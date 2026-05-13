@@ -15,6 +15,12 @@ def get_configs():
     parser = argparse.ArgumentParser()
     # dataset
     parser.add_argument("--dataset_dir", type=Path, default=Path("sample_data"))
+    parser.add_argument("--h5_train_path", type=str, default=None,
+                        help="Path to train HDF5 file (combined_v3 format). Overrides --dataset_dir.")
+    parser.add_argument("--h5_val_path", type=str, default=None,
+                        help="Path to val HDF5 file (combined_v3 format).")
+    parser.add_argument("--h5_camera_key", type=str, default="camera_0",
+                        help="Dataset key for camera frames inside each trajectory group.")
     parser.add_argument(
         "--variable_history_sampling", type=lambda x: x.lower() == "true", default=True
     )
@@ -25,7 +31,8 @@ def get_configs():
     parser.add_argument("--num_history", type=int, default=2)
     parser.add_argument("--frame_skip", type=int, default=2)
     parser.add_argument("--subset_names", type=str, default="bridge_v2")
-    parser.add_argument("--action_dim", type=int, default=10)
+    parser.add_argument("--action_dim", type=int, default=7,
+                        help="Action dimensionality (7 for combined_v3, 10 for bridge_v2 MP4).")
     parser.add_argument("--num_workers", type=int, default=6)
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--timesteps", type=int, default=1000)
@@ -50,6 +57,13 @@ def get_configs():
         choices=["vae", "rae", "scale_rae_siglip", "scale_rae_webssl", "qwen", "vjepa2", "cosmos", "vavae"],
         default="vae",
     )
+    parser.add_argument("--vae_model_path", type=str, default=None,
+                        help="HuggingFace repo or local path for the VAE encoder "
+                             "(default: stabilityai/sd-vae-ft-mse). Use "
+                             "'stabilityai/stable-diffusion-3-medium-diffusers' + "
+                             "--vae_subfolder vae for the SD3 VAE if you have access.")
+    parser.add_argument("--vae_subfolder", type=str, default=None,
+                        help="Subfolder inside the VAE repo (e.g. 'vae' for SD3).")
     parser.add_argument("--qwen_model_path", type=str, default="Qwen/Qwen2.5-VL-3B-Instruct")
     parser.add_argument("--qwen_mode", type=str, default="video", choices=["video", "image"])
     parser.add_argument("--vjepa2_model_size", type=str, default="vitl", choices=["vitl", "vitb"],

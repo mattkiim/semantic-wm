@@ -15,7 +15,7 @@ from tqdm import tqdm
 
 import wandb
 
-from ..data.dataset import OpenXMP4VideoDataset, MultiViewMP4VideoDataset
+from ..data.dataset import H5TrajectoryDataset, MultiViewMP4VideoDataset, OpenXMP4VideoDataset
 from ..models.model import DiT
 from ..models.base_autoencoder import create_autoencoder, encoder_config_from_args
 from ..models.adapters import create_adapter, IdentityAdapter
@@ -72,7 +72,10 @@ def train_wm(args) -> None:
 
     # ── Data ─────────────────────────────────────────────────────────────────
     num_views = getattr(args, "num_views", 1)
-    if num_views > 1:
+    if getattr(args, "h5_train_path", None):
+        train_dataset = H5TrajectoryDataset(args, split="train")
+        val_dataset = H5TrajectoryDataset(args, split="test")
+    elif num_views > 1:
         train_dataset = MultiViewMP4VideoDataset(args, split="train")
         val_dataset = MultiViewMP4VideoDataset(args, split="test")
     else:

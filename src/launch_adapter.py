@@ -32,11 +32,18 @@ def get_configs():
 
     # ---- Dataset (shared with launch.py) ------------------------------------
     parser.add_argument("--dataset_dir", type=str, default="sample_data")
+    parser.add_argument("--h5_train_path", type=str, default=None,
+                        help="Path to train HDF5 file (combined_v3 format). Overrides --dataset_dir.")
+    parser.add_argument("--h5_val_path", type=str, default=None,
+                        help="Path to val HDF5 file (combined_v3 format).")
+    parser.add_argument("--h5_camera_key", type=str, default="camera_0",
+                        help="Dataset key for camera frames inside each trajectory group.")
     parser.add_argument("--subset_names", type=str, default="bridge_v2")
     parser.add_argument("--n_frames", type=int, default=10)
     parser.add_argument("--num_history", type=int, default=2)
     parser.add_argument("--frame_skip", type=int, default=2)
-    parser.add_argument("--action_dim", type=int, default=10)
+    parser.add_argument("--action_dim", type=int, default=7,
+                        help="Action dimensionality (7 for combined_v3, 10 for bridge_v2 MP4).")
     parser.add_argument("--input_h", type=int, default=256)
     parser.add_argument("--input_w", type=int, default=256)
     parser.add_argument("--num_workers", type=int, default=8)
@@ -52,6 +59,11 @@ def get_configs():
         choices=["vae", "rae", "scale_rae_siglip", "scale_rae_webssl", "qwen", "vjepa2", "cosmos", "vavae"],
         default="rae",
     )
+    parser.add_argument("--vae_model_path", type=str, default=None,
+                        help="HuggingFace repo or local path for the VAE encoder "
+                             "(default: stabilityai/sd-vae-ft-mse).")
+    parser.add_argument("--vae_subfolder", type=str, default=None,
+                        help="Subfolder inside the VAE repo (e.g. 'vae' for SD3).")
     parser.add_argument("--qwen_model_path", type=str, default="Qwen/Qwen2.5-VL-3B-Instruct")
     parser.add_argument("--qwen_mode", type=str, default="video", choices=["video", "image"])
     parser.add_argument("--vjepa2_model_size", type=str, default="vitl", choices=["vitl", "vitb"],

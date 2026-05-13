@@ -14,6 +14,130 @@ from torch.utils.data import Dataset
 from torchvision import transforms
 
 
+class H5TrajectoryDataset(Dataset):
+    """Dataset backed by a consolidated HDF5 file (combined_v3 format).
+
+    Each trajectory group must contain:
+      - ``{camera_key}``: (T, H, W, C) float32 in [0, 1]
+      - ``actions``:      (T, action_dim) float
+
+    Args:
+        args: Namespace with fields:
+            h5_train_path, h5_val_path, n_frames, num_history,
+            frame_skip, action_dim, input_h, input_w,
+            variable_history_sampling, h5_camera_key (optional).
+        split: ``"train"`` or ``"test"``/``"val"``.
+    """
+
+    def __init__(self, args, split: str = "train") -> None:
+        super().__init__()
+
+        if split == "train":
+            h5_path = getattr(args, "h5_train_path", None)
+        else:
+            h5_path = getattr(args, "h5_val_path", None)
+
+        if not h5_path:
+            raise ValueError(
+                f"'h5_{'train' if split == 'train' else 'val'}_path' must be set in args"
+            )
+
+        self.h5_path = Path(h5_path)
+        self.n_frames = int(args.n_frames)
+        self.num_history = int(args.num_history)
+        self.frame_skip = int(args.frame_skip)
+        self.clip_len = self.n_frames * self.frame_skip
+        self.action_dim = int(args.action_dim)
+        self.variable_history_sampling = args.variable_history_sampling
+        self.camera_key = str(getattr(args, "h5_camera_key", "camera_0"))
+        self.transform = transforms.Resize((int(args.input_h), int(args.input_w)))
+
+        # Per-worker lazy file handle (h5py handles can't be pickled across workers)
+        self._h5_file = None
+
+        import h5py
+        with h5py.File(self.h5_path, "r") as f:
+            all_keys = sorted(f.keys())
+            valid_keys, valid_lengths = [], []
+            for k in all_keys:
+                length = int(f[k]["actions"].shape[0])
+                if length >= self.clip_len:
+                    valid_keys.append(k)
+                    valid_lengths.append(length)
+
+        if not valid_keys:
+            raise RuntimeError(
+                f"No trajectories with length >= {self.clip_len} found in {self.h5_path}"
+            )
+
+        self.traj_keys = valid_keys
+        self.traj_lengths = valid_lengths
+
+    def __len__(self) -> int:
+        return len(self.traj_keys)
+
+    def _get_h5(self):
+        if self._h5_file is None:
+            import h5py
+            self._h5_file = h5py.File(self.h5_path, "r")
+        return self._h5_file
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+        key = self.traj_keys[idx]
+        length = self.traj_lengths[idx]
+
+        n_history = self.num_history
+        n_future = self.n_frames - n_history
+
+        if self.variable_history_sampling:
+            skip_future = np.random.randint(1, 3) * self.frame_skip
+            skip_history = skip_future * 4
+            if np.random.random() < 0.15:
+                skip_history = 0
+        else:
+            skip_future = self.frame_skip
+            skip_history = self.frame_skip
+
+        history_span = (
+            n_history * skip_history if (n_history > 0 and skip_history > 0) else 0
+        )
+        future_span = (n_future - 1) * skip_future + 1
+
+        max_start = length - future_span
+        min_start = history_span
+        if max_start < min_start:
+            current_step = min_start
+        else:
+            current_step = np.random.randint(min_start, max_start + 1)
+
+        step_indices = []
+        for i in range(n_history, 0, -1):
+            step_indices.append(max(0, current_step - i * skip_history))
+        step_indices.append(current_step)
+        for i in range(1, n_future):
+            step_indices.append(min(current_step + i * skip_future, length - 1))
+
+        f = self._get_h5()
+        traj = f[key]
+        # h5py requires strictly increasing indices; use unique sorted indices then remap.
+        idx_arr = np.array(step_indices)
+        unique_sorted, inverse = np.unique(idx_arr, return_inverse=True)
+        frames = traj[self.camera_key][unique_sorted.tolist()][inverse]
+        actions = traj["actions"][unique_sorted.tolist()][inverse]
+
+        assert (
+            actions.shape[1] == self.action_dim
+        ), f"Unexpected action dim: {actions.shape[1]} != {self.action_dim}"
+
+        frames = torch.from_numpy(frames).float()
+        frames = einops.rearrange(frames, "t h w c -> t c h w")
+        frames = self.transform(frames)
+        frames = einops.rearrange(frames, "t c h w -> t h w c")
+
+        actions = torch.from_numpy(np.array(actions)).float()
+        return frames, actions
+
+
 def _load_encoded_video_cls():
     try:
         from pytorchvideo.data.encoded_video import EncodedVideo

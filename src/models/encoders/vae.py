@@ -5,13 +5,19 @@ from diffusers.models import AutoencoderKL
 
 from ..base_autoencoder import BaseAutoencoder
 
+_DEFAULT_VAE_MODEL = "stabilityai/stable-diffusion-3-medium-diffusers"
+_DEFAULT_VAE_SUBFOLDER = "vae"
+
 
 class VAE(BaseAutoencoder):
-    def __init__(self):
+    def __init__(
+        self,
+        model_path: str = _DEFAULT_VAE_MODEL,
+        subfolder: str | None = _DEFAULT_VAE_SUBFOLDER,
+    ):
         super().__init__()
-        self.vae = AutoencoderKL.from_pretrained(
-            "stabilityai/stable-diffusion-3-medium-diffusers", subfolder="vae"
-        )
+        kwargs = {"subfolder": subfolder} if subfolder else {}
+        self.vae = AutoencoderKL.from_pretrained(model_path, **kwargs)
         self.vae.eval().requires_grad_(False)
         self.vae.to(torch.bfloat16)
 

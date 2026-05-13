@@ -105,7 +105,12 @@ def create_autoencoder(config: Dict[str, Any]) -> BaseAutoencoder:
     if encoder_type == "vae":
         from .encoders.vae import VAE
 
-        return VAE()
+        vae_kwargs = {}
+        if config.get("vae_model_path"):
+            vae_kwargs["model_path"] = config["vae_model_path"]
+        if config.get("vae_subfolder"):
+            vae_kwargs["subfolder"] = config["vae_subfolder"]
+        return VAE(**vae_kwargs)
 
     if encoder_type == "rae":
         from .encoders.rae import RAE
@@ -161,6 +166,12 @@ def encoder_config_from_args(args) -> Dict[str, Any]:
     the dict format expected by :func:`create_autoencoder`.
     """
     config: Dict[str, Any] = {"encoder_type": args.encoder_type}
+
+    if args.encoder_type == "vae":
+        if getattr(args, "vae_model_path", None):
+            config["vae_model_path"] = args.vae_model_path
+        if getattr(args, "vae_subfolder", None):
+            config["vae_subfolder"] = args.vae_subfolder
 
     if args.encoder_type == "rae":
         rae_params: Dict[str, Any] = {}

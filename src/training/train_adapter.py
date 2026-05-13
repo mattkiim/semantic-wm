@@ -39,7 +39,7 @@ except ImportError:
 
 import wandb
 
-from ..data.dataset import OpenXMP4VideoDataset
+from ..data.dataset import H5TrajectoryDataset, OpenXMP4VideoDataset
 from ..models.adapters import create_adapter, kl_divergence, adapter_config_from_args
 from ..models.base_autoencoder import create_autoencoder, encoder_config_from_args
 from ..models.discriminator import (
@@ -115,8 +115,12 @@ def train_adapter(args) -> None:
         init_wandb(args, checkpoint_dir, run_name)
 
     # ── Data ─────────────────────────────────────────────────────────────────
-    train_dataset = OpenXMP4VideoDataset(args, split="train")
-    val_dataset = OpenXMP4VideoDataset(args, split="test")
+    if getattr(args, "h5_train_path", None):
+        train_dataset = H5TrajectoryDataset(args, split="train")
+        val_dataset = H5TrajectoryDataset(args, split="test")
+    else:
+        train_dataset = OpenXMP4VideoDataset(args, split="train")
+        val_dataset = OpenXMP4VideoDataset(args, split="test")
 
     train_sampler = (
         DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)

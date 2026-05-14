@@ -56,9 +56,17 @@ def get_configs():
     parser.add_argument(
         "--encoder_type",
         type=str,
-        choices=["vae", "rae", "scale_rae_siglip", "scale_rae_webssl", "qwen", "vjepa2", "cosmos", "vavae"],
+        choices=["vae", "rae", "scale_rae_siglip", "scale_rae_webssl", "qwen", "vjepa2", "cosmos", "vavae", "precomputed"],
         default="rae",
     )
+    parser.add_argument("--embedding_dim", type=int, default=384,
+                        help="Feature dimension of pre-computed embeddings (precomputed encoder only).")
+    parser.add_argument("--patch_h", type=int, default=14,
+                        help="Patch grid height for pre-computed embeddings.")
+    parser.add_argument("--patch_w", type=int, default=14,
+                        help="Patch grid width for pre-computed embeddings.")
+    parser.add_argument("--h5_embedding_key", type=str, default="cam_0_patch_embd",
+                        help="HDF5 dataset key for pre-computed patch embeddings.")
     parser.add_argument("--vae_model_path", type=str, default=None,
                         help="HuggingFace repo or local path for the VAE encoder "
                              "(default: stabilityai/sd-vae-ft-mse).")

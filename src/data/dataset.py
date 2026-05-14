@@ -1,3 +1,4 @@
+
 import json
 import os
 import random
@@ -12,6 +13,124 @@ import torch
 import einops
 from torch.utils.data import Dataset
 from torchvision import transforms
+
+
+class H5EmbeddingDataset(Dataset):
+    """Loads pre-computed backbone patch embeddings from HDF5 (combined_v3 format).
+
+    Returns ``(embeddings, actions)`` where embeddings are
+    ``(T, patch_h, patch_w, D)`` float32 — ready to feed directly into the
+    adapter / DiT without any encoder forward pass.
+
+    Args:
+        args: Namespace with h5_train_path, h5_val_path, h5_embedding_key,
+              patch_h, patch_w, n_frames, num_history, frame_skip, action_dim,
+              variable_history_sampling.
+        split: ``"train"`` or ``"test"``/``"val"``.
+    """
+
+    def __init__(self, args, split: str = "train") -> None:
+        super().__init__()
+
+        if split == "train":
+            h5_path = getattr(args, "h5_train_path", None)
+        else:
+            h5_path = getattr(args, "h5_val_path", None)
+
+        if not h5_path:
+            raise ValueError(f"h5_{'train' if split == 'train' else 'val'}_path must be set")
+
+        self.h5_path = Path(h5_path)
+        self.embedding_key = str(getattr(args, "h5_embedding_key", "cam_0_patch_embd"))
+        self.patch_h = int(getattr(args, "patch_h", 14))
+        self.patch_w = int(getattr(args, "patch_w", 14))
+        self.n_frames = int(args.n_frames)
+        self.num_history = int(args.num_history)
+        self.frame_skip = int(args.frame_skip)
+        self.clip_len = self.n_frames * self.frame_skip
+        self.action_dim = int(args.action_dim)
+        self.variable_history_sampling = args.variable_history_sampling
+
+        self._h5_file = None
+
+        import h5py
+        with h5py.File(self.h5_path, "r") as f:
+            all_keys = sorted(f.keys())
+            valid_keys, valid_lengths = [], []
+            for k in all_keys:
+                length = int(f[k]["actions"].shape[0])
+                if length >= self.clip_len:
+                    valid_keys.append(k)
+                    valid_lengths.append(length)
+
+        if not valid_keys:
+            raise RuntimeError(
+                f"No trajectories with length >= {self.clip_len} in {self.h5_path}"
+            )
+        self.traj_keys = valid_keys
+        self.traj_lengths = valid_lengths
+
+    def __len__(self) -> int:
+        return len(self.traj_keys)
+
+    def _get_h5(self):
+        if self._h5_file is None:
+            import h5py
+            self._h5_file = h5py.File(self.h5_path, "r")
+        return self._h5_file
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+        key = self.traj_keys[idx]
+        length = self.traj_lengths[idx]
+
+        n_history = self.num_history
+        n_future = self.n_frames - n_history
+
+        if self.variable_history_sampling:
+            skip_future = np.random.randint(1, 3) * self.frame_skip
+            skip_history = skip_future * 4
+            if np.random.random() < 0.15:
+                skip_history = 0
+        else:
+            skip_future = self.frame_skip
+            skip_history = self.frame_skip
+
+        history_span = (
+            n_history * skip_history if (n_history > 0 and skip_history > 0) else 0
+        )
+        future_span = (n_future - 1) * skip_future + 1
+        max_start = length - future_span
+        min_start = history_span
+        if max_start < min_start:
+            current_step = min_start
+        else:
+            current_step = np.random.randint(min_start, max_start + 1)
+
+        step_indices = []
+        for i in range(n_history, 0, -1):
+            step_indices.append(max(0, current_step - i * skip_history))
+        step_indices.append(current_step)
+        for i in range(1, n_future):
+            step_indices.append(min(current_step + i * skip_future, length - 1))
+
+        f = self._get_h5()
+        traj = f[key]
+        idx_arr = np.array(step_indices)
+        unique_sorted, inverse = np.unique(idx_arr, return_inverse=True)
+
+        # embeddings: (n_frames, N_patches, D) → reshape to (n_frames, patch_h, patch_w, D)
+        emb = traj[self.embedding_key][unique_sorted.tolist()][inverse]
+        actions = traj["actions"][unique_sorted.tolist()][inverse]
+
+        assert (
+            actions.shape[1] == self.action_dim
+        ), f"Unexpected action dim: {actions.shape[1]} != {self.action_dim}"
+
+        emb = torch.from_numpy(np.array(emb)).float()
+        emb = emb.reshape(self.n_frames, self.patch_h, self.patch_w, -1)
+
+        actions = torch.from_numpy(np.array(actions)).float()
+        return emb, actions
 
 
 class H5TrajectoryDataset(Dataset):

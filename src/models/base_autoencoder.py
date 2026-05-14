@@ -156,6 +156,10 @@ def create_autoencoder(config: Dict[str, Any]) -> BaseAutoencoder:
             checkpoint_path=config.get("vavae_checkpoint_path"),
         )
 
+    if encoder_type == "precomputed":
+        from .encoders.precomputed import PrecomputedEncoder
+        return PrecomputedEncoder(embedding_dim=config.get("embedding_dim", 384))
+
     raise ValueError(f"Unknown encoder type: {encoder_type}")
 
 
@@ -207,5 +211,8 @@ def encoder_config_from_args(args) -> Dict[str, Any]:
 
     elif args.encoder_type == "vavae":
         config["vavae_checkpoint_path"] = getattr(args, "vavae_checkpoint_path", None)
+
+    elif args.encoder_type == "precomputed":
+        config["embedding_dim"] = getattr(args, "embedding_dim", 384)
 
     return config

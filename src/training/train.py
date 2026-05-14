@@ -15,7 +15,7 @@ from tqdm import tqdm
 
 import wandb
 
-from ..data.dataset import H5TrajectoryDataset, MultiViewMP4VideoDataset, OpenXMP4VideoDataset
+from ..data.dataset import H5EmbeddingDataset, H5TrajectoryDataset, MultiViewMP4VideoDataset, OpenXMP4VideoDataset
 from ..models.model import DiT
 from ..models.base_autoencoder import create_autoencoder, encoder_config_from_args
 from ..models.adapters import create_adapter, IdentityAdapter
@@ -73,8 +73,12 @@ def train_wm(args) -> None:
     # ── Data ─────────────────────────────────────────────────────────────────
     num_views = getattr(args, "num_views", 1)
     if getattr(args, "h5_train_path", None):
-        train_dataset = H5TrajectoryDataset(args, split="train")
-        val_dataset = H5TrajectoryDataset(args, split="test")
+        if args.encoder_type == "precomputed":
+            train_dataset = H5EmbeddingDataset(args, split="train")
+            val_dataset = H5EmbeddingDataset(args, split="test")
+        else:
+            train_dataset = H5TrajectoryDataset(args, split="train")
+            val_dataset = H5TrajectoryDataset(args, split="test")
     elif num_views > 1:
         train_dataset = MultiViewMP4VideoDataset(args, split="train")
         val_dataset = MultiViewMP4VideoDataset(args, split="test")
@@ -303,6 +307,9 @@ def train_wm(args) -> None:
         total_samples_seen += args.batch_size * world_size
         train_steps += 1
 
+        if pbar is not None:
+            pbar.update(1)
+
         # Logging
         if total_samples_seen - last_log_samples >= args.log_every_samples:
             avg_loss = running_loss / num_batches
@@ -312,7 +319,6 @@ def train_wm(args) -> None:
                 avg_loss = (avg_loss / world_size).detach().cpu()
             if rank == 0:
                 pbar.set_postfix({"loss": avg_loss.item(), "samples": total_samples_seen})
-                pbar.update(args.log_every_samples // (args.batch_size * world_size))
                 wandb.log(
                     {
                         "train/loss": float(avg_loss),

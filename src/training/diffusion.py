@@ -296,7 +296,7 @@ class FlowMatching(nn.Module):
             )
         else:
             raise ValueError(f"Unknown time_dist_type: {self.time_dist_type}")
-        return self.time_shift(t)
+        return self.time_shift(t).to(dtype)
 
     def loss_fn(
         self,

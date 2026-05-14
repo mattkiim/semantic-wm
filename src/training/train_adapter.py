@@ -39,7 +39,7 @@ except ImportError:
 
 import wandb
 
-from ..data.dataset import H5TrajectoryDataset, OpenXMP4VideoDataset
+from ..data.dataset import H5EmbeddingDataset, H5TrajectoryDataset, OpenXMP4VideoDataset
 from ..models.adapters import create_adapter, kl_divergence, adapter_config_from_args
 from ..models.base_autoencoder import create_autoencoder, encoder_config_from_args
 from ..models.discriminator import (
@@ -116,8 +116,12 @@ def train_adapter(args) -> None:
 
     # ── Data ─────────────────────────────────────────────────────────────────
     if getattr(args, "h5_train_path", None):
-        train_dataset = H5TrajectoryDataset(args, split="train")
-        val_dataset = H5TrajectoryDataset(args, split="test")
+        if args.encoder_type == "precomputed":
+            train_dataset = H5EmbeddingDataset(args, split="train")
+            val_dataset = H5EmbeddingDataset(args, split="test")
+        else:
+            train_dataset = H5TrajectoryDataset(args, split="train")
+            val_dataset = H5TrajectoryDataset(args, split="test")
     else:
         train_dataset = OpenXMP4VideoDataset(args, split="train")
         val_dataset = OpenXMP4VideoDataset(args, split="test")
@@ -270,9 +274,14 @@ def train_adapter(args) -> None:
     running_loss = running_mse = running_cos = running_pixel = 0.0
     running_ssim_loss = running_disc_loss = running_gen_loss = 0.0
     num_batches = 0
-    last_log = (total_samples_seen // log_every) * log_every
-    last_val = (total_samples_seen // val_every) * val_every
-    last_vis = (total_samples_seen // vis_every) * vis_every
+    # If wandb resumed a prior run that logged further than our checkpoint,
+    # align last_log to the wandb high-watermark so we never log out of order.
+    wandb_step_floor = 0
+    if rank == 0 and wandb.run is not None:
+        wandb_step_floor = getattr(wandb.run, "step", 0) or 0
+    last_log = max((total_samples_seen // log_every) * log_every, wandb_step_floor)
+    last_val = max((total_samples_seen // val_every) * val_every, (wandb_step_floor // val_every) * val_every)
+    last_vis = max((total_samples_seen // vis_every) * vis_every, (wandb_step_floor // vis_every) * vis_every)
 
     pbar = tqdm(total=max_train_steps, desc="Adapter training") if rank == 0 else None
     if pbar and train_steps > 0:
@@ -411,13 +420,15 @@ def train_adapter(args) -> None:
         total_samples_seen += args.batch_size * world_size
         train_steps += 1
 
+        if pbar is not None:
+            pbar.update(1)
+
         # Logging
         if total_samples_seen - last_log >= log_every:
             n = max(num_batches, 1)
             if rank == 0:
                 if pbar:
                     pbar.set_postfix(loss=f"{running_loss / n:.5f}", samples=total_samples_seen)
-                    pbar.update(log_every // (args.batch_size * world_size))
                 log_dict = {
                     "adapter/loss": running_loss / n,
                     "adapter/loss_rec": loss_rec.item(),

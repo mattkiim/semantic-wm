@@ -8,7 +8,7 @@ from pathlib import Path
 from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 
 from ..models.adapters import IdentityAdapter
-from .utils import downsample_actions_temporal
+from .utils import downsample_actions_temporal, downsample_sequence_temporal
 
 
 def validate_step(
@@ -52,10 +52,11 @@ def validate_step(
     model.eval()
     with torch.no_grad():
         try:
-            val_x, val_actions = next(val_iter)
+            batch = next(val_iter)
         except StopIteration:
             val_iter = iter(val_loader)
-            val_x, val_actions = next(val_iter)
+            batch = next(val_iter)
+        val_x, val_actions, val_tactile = _unpack_batch(batch)
 
         val_x = val_x.to(device)
         with torch.autocast(device_type="cuda", dtype=precision):
@@ -87,12 +88,16 @@ def validate_step(
                 else:
                     val_latent_adapted = val_latent
             val_actions = val_actions.to(device)
+            if val_tactile is not None:
+                val_tactile = val_tactile.to(device)
             ema.eval()
 
             # Handle temporal downsampling (e.g. Qwen video, V-JEPA 2.1)
             temporal_ds = getattr(autoencoder, "temporal_downsample_factor", 1)
             if temporal_ds > 1:
                 val_actions = downsample_actions_temporal(val_actions, temporal_ds)
+                if val_tactile is not None:
+                    val_tactile = downsample_sequence_temporal(val_tactile, temporal_ds)
             n_ctx = max(args.num_history // temporal_ds, 1)
             effective_skip = args.num_history // temporal_ds
 
@@ -105,6 +110,7 @@ def validate_step(
                 window_len=args.window_len,
                 horizon=args.horizon,
                 cfg=args.cfg,
+                tactile=val_tactile,
             )
             # Calculate MSE in latent space (before decoding)
             mse = F.mse_loss(samples_latent, val_latent_adapted).detach().cpu()
@@ -210,6 +216,15 @@ def validate_step(
     )
 
     return val_iter
+
+
+def _unpack_batch(batch):
+    if len(batch) == 2:
+        val_x, val_actions = batch
+        return val_x, val_actions, None
+    if len(batch) == 3:
+        return batch
+    raise ValueError(f"Expected batch of length 2 or 3, got {len(batch)}")
 
 
 def calculate_image_metrics(generated_frames, gt_frames, skip_frames=0):

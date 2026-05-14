@@ -488,11 +488,13 @@ class DiT(nn.Module):
         decoder_heads: int = 16,
         num_views: int = 1,
         temporal_mode: str = "factored",
+        tactile_dim: int = 0,
     ) -> None:
         super().__init__()
         self.in_channels = in_channels
         self.patch_size = patch_size
         self.action_dim = action_dim
+        self.tactile_dim = tactile_dim
         self.action_dropout_prob = action_dropout_prob
         self.wide_head = wide_head
         self.num_views = num_views
@@ -506,6 +508,7 @@ class DiT(nn.Module):
             nn.Linear(dim, dim, bias=True),
         )
         self.action_embedder = nn.Linear(action_dim, dim)
+        self.tactile_embedder = nn.Linear(tactile_dim, dim) if tactile_dim > 0 else None
         self.blocks = nn.ModuleList(
             [Block(dim, num_heads, rope_config, temporal_mode=temporal_mode) for _ in range(num_layers)]
         )
@@ -600,7 +603,12 @@ class DiT(nn.Module):
         null_action[..., -1] = 1
         return null_action
 
-    def get_cond(self, t: torch.Tensor, action: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def get_cond(
+        self,
+        t: torch.Tensor,
+        action: torch.Tensor,
+        tactile: torch.Tensor | None = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         B, T = t.shape
         t = einops.rearrange(t, "b t -> (b t)")
         t_freq = self.timestep_embedding(t)
@@ -613,15 +621,27 @@ class DiT(nn.Module):
             null_action = self.get_null_cond(action)
             action = torch.where(should_drop, null_action, action)
 
-        return time_cond, self.action_embedder(action)
+        tactile_cond = None
+        if self.tactile_embedder is not None:
+            if tactile is None:
+                raise ValueError("DiT was configured with tactile_dim > 0 but no tactile tensor was provided")
+            tactile_cond = self.tactile_embedder(tactile)
+
+        return time_cond, self.action_embedder(action), tactile_cond
 
     def forward(
-        self, x: torch.Tensor, t: torch.Tensor, action: torch.Tensor
+        self,
+        x: torch.Tensor,
+        t: torch.Tensor,
+        action: torch.Tensor,
+        tactile: torch.Tensor | None = None,
     ) -> torch.Tensor:
         B, T, H, W, C = x.shape
         x = self.patchify(x)
-        time_cond, action_cond = self.get_cond(t, action)
+        time_cond, action_cond, tactile_cond = self.get_cond(t, action, tactile)
         c = time_cond + action_cond
+        if tactile_cond is not None:
+            c = c + tactile_cond
         for block in self.blocks:
             x = block(x, c, num_views=self.num_views)
 

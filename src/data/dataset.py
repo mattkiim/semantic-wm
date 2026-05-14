@@ -15,6 +15,25 @@ from torch.utils.data import Dataset
 from torchvision import transforms
 
 
+def _tactile_enabled(args) -> bool:
+    return bool(getattr(args, "use_tactile", False) or getattr(args, "tactile_dim", 0) > 0)
+
+
+def _npz_array(npz_data, key: str):
+    if key in npz_data:
+        return npz_data[key]
+    if key == "tactile" and "touch" in npz_data:
+        return npz_data["touch"]
+    raise KeyError(key)
+
+
+def _prepare_tactile_array(tactile) -> np.ndarray:
+    tactile = np.array(tactile)
+    if tactile.ndim > 2:
+        tactile = tactile.mean(axis=tuple(range(1, tactile.ndim - 1)))
+    return tactile
+
+
 class H5EmbeddingDataset(Dataset):
     """Loads pre-computed backbone patch embeddings from HDF5 (combined_v3 format).
 
@@ -49,6 +68,9 @@ class H5EmbeddingDataset(Dataset):
         self.frame_skip = int(args.frame_skip)
         self.clip_len = self.n_frames * self.frame_skip
         self.action_dim = int(args.action_dim)
+        self.use_tactile = _tactile_enabled(args)
+        self.tactile_dim = int(getattr(args, "tactile_dim", 0))
+        self.tactile_key = str(getattr(args, "h5_tactile_key", "cam_tactile_patch_embd"))
         self.variable_history_sampling = args.variable_history_sampling
 
         self._h5_file = None
@@ -59,6 +81,10 @@ class H5EmbeddingDataset(Dataset):
             valid_keys, valid_lengths = [], []
             for k in all_keys:
                 length = int(f[k]["actions"].shape[0])
+                if self.use_tactile:
+                    if self.tactile_key not in f[k]:
+                        continue
+                    length = min(length, int(f[k][self.tactile_key].shape[0]))
                 if length >= self.clip_len:
                     valid_keys.append(k)
                     valid_lengths.append(length)
@@ -121,6 +147,11 @@ class H5EmbeddingDataset(Dataset):
         # embeddings: (n_frames, N_patches, D) → reshape to (n_frames, patch_h, patch_w, D)
         emb = traj[self.embedding_key][unique_sorted.tolist()][inverse]
         actions = traj["actions"][unique_sorted.tolist()][inverse]
+        tactile = (
+            traj[self.tactile_key][unique_sorted.tolist()][inverse]
+            if self.use_tactile
+            else None
+        )
 
         assert (
             actions.shape[1] == self.action_dim
@@ -130,7 +161,15 @@ class H5EmbeddingDataset(Dataset):
         emb = emb.reshape(self.n_frames, self.patch_h, self.patch_w, -1)
 
         actions = torch.from_numpy(np.array(actions)).float()
-        return emb, actions
+        if tactile is None:
+            return emb, actions
+
+        tactile = torch.from_numpy(_prepare_tactile_array(tactile)).float()
+        if self.tactile_dim > 0:
+            assert (
+                tactile.shape[1] == self.tactile_dim
+            ), f"Unexpected tactile dim: {tactile.shape[1]} != {self.tactile_dim}"
+        return emb, actions, tactile
 
 
 class H5TrajectoryDataset(Dataset):
@@ -167,6 +206,9 @@ class H5TrajectoryDataset(Dataset):
         self.frame_skip = int(args.frame_skip)
         self.clip_len = self.n_frames * self.frame_skip
         self.action_dim = int(args.action_dim)
+        self.use_tactile = _tactile_enabled(args)
+        self.tactile_dim = int(getattr(args, "tactile_dim", 0))
+        self.tactile_key = str(getattr(args, "h5_tactile_key", "cam_tactile_patch_embd"))
         self.variable_history_sampling = args.variable_history_sampling
         self.camera_key = str(getattr(args, "h5_camera_key", "camera_0"))
         self.transform = transforms.Resize((int(args.input_h), int(args.input_w)))
@@ -180,6 +222,10 @@ class H5TrajectoryDataset(Dataset):
             valid_keys, valid_lengths = [], []
             for k in all_keys:
                 length = int(f[k]["actions"].shape[0])
+                if self.use_tactile:
+                    if self.tactile_key not in f[k]:
+                        continue
+                    length = min(length, int(f[k][self.tactile_key].shape[0]))
                 if length >= self.clip_len:
                     valid_keys.append(k)
                     valid_lengths.append(length)
@@ -243,6 +289,11 @@ class H5TrajectoryDataset(Dataset):
         unique_sorted, inverse = np.unique(idx_arr, return_inverse=True)
         frames = traj[self.camera_key][unique_sorted.tolist()][inverse]
         actions = traj["actions"][unique_sorted.tolist()][inverse]
+        tactile = (
+            traj[self.tactile_key][unique_sorted.tolist()][inverse]
+            if self.use_tactile
+            else None
+        )
 
         assert (
             actions.shape[1] == self.action_dim
@@ -254,7 +305,15 @@ class H5TrajectoryDataset(Dataset):
         frames = einops.rearrange(frames, "t c h w -> t h w c")
 
         actions = torch.from_numpy(np.array(actions)).float()
-        return frames, actions
+        if tactile is None:
+            return frames, actions
+
+        tactile = torch.from_numpy(_prepare_tactile_array(tactile)).float()
+        if self.tactile_dim > 0:
+            assert (
+                tactile.shape[1] == self.tactile_dim
+            ), f"Unexpected tactile dim: {tactile.shape[1]} != {self.tactile_dim}"
+        return frames, actions, tactile
 
 
 def _load_encoded_video_cls():
@@ -295,6 +354,9 @@ class OpenXMP4VideoDataset(Dataset):
         self.frame_skip = int(args.frame_skip)
         self.clip_len = self.n_frames * self.frame_skip
         self.action_dim = int(args.action_dim)
+        self.use_tactile = _tactile_enabled(args)
+        self.tactile_dim = int(getattr(args, "tactile_dim", 0))
+        self.tactile_key = str(getattr(args, "tactile_npz_key", "tactile"))
         self.variable_history_sampling = args.variable_history_sampling
 
         self.transform = transforms.Resize((int(args.input_h), int(args.input_w)))
@@ -313,7 +375,11 @@ class OpenXMP4VideoDataset(Dataset):
                 try:
                     npz = np.load(action_path)
                     arr = npz["actions"] if "actions" in npz else npz["arr_0"]
-                    length = int(arr.shape[0])
+                    if self.use_tactile:
+                        tactile_arr = _npz_array(npz, self.tactile_key)
+                        length = min(int(arr.shape[0]), int(tactile_arr.shape[0]))
+                    else:
+                        length = int(arr.shape[0])
                 except Exception:
                     continue
                 if length >= self.clip_len:
@@ -393,6 +459,10 @@ class OpenXMP4VideoDataset(Dataset):
         )
         safe_indices = [min(si, len(actions_all) - 1) for si in step_indices]
         actions = actions_all[safe_indices]
+        tactile = None
+        if self.use_tactile:
+            tactile_all = _npz_array(npz_data, self.tactile_key)
+            tactile = tactile_all[safe_indices]
         assert (
             actions.shape[1] == self.action_dim
         ), f"Unexpected action dim: {actions.shape[1]} != {self.action_dim}"
@@ -405,7 +475,15 @@ class OpenXMP4VideoDataset(Dataset):
         clip = self.transform(clip)
         clip = einops.rearrange(clip, "t c h w -> t h w c")
         actions = torch.from_numpy(actions).float()
-        return clip, actions
+        if tactile is None:
+            return clip, actions
+
+        tactile = torch.from_numpy(_prepare_tactile_array(tactile)).float()
+        if self.tactile_dim > 0:
+            assert (
+                tactile.shape[1] == self.tactile_dim
+            ), f"Unexpected tactile dim: {tactile.shape[1]} != {self.tactile_dim}"
+        return clip, actions, tactile
 
 
 class MultiViewMP4VideoDataset(OpenXMP4VideoDataset):
@@ -438,6 +516,9 @@ class MultiViewMP4VideoDataset(OpenXMP4VideoDataset):
         self.frame_skip = int(args.frame_skip)
         self.clip_len = self.n_frames * self.frame_skip
         self.action_dim = int(args.action_dim)
+        self.use_tactile = _tactile_enabled(args)
+        self.tactile_dim = int(getattr(args, "tactile_dim", 0))
+        self.tactile_key = str(getattr(args, "tactile_npz_key", "tactile"))
         self.variable_history_sampling = args.variable_history_sampling
         self.transform = transforms.Resize((int(args.input_h), int(args.input_w)))
 
@@ -465,7 +546,11 @@ class MultiViewMP4VideoDataset(OpenXMP4VideoDataset):
                 try:
                     npz = np.load(action_path)
                     arr = npz["actions"] if "actions" in npz else npz["arr_0"]
-                    length = int(arr.shape[0])
+                    if self.use_tactile:
+                        tactile_arr = _npz_array(npz, self.tactile_key)
+                        length = min(int(arr.shape[0]), int(tactile_arr.shape[0]))
+                    else:
+                        length = int(arr.shape[0])
                 except Exception:
                     continue
                 if length >= self.clip_len:
@@ -548,8 +633,20 @@ class MultiViewMP4VideoDataset(OpenXMP4VideoDataset):
         )
         safe_indices = [min(si, len(actions_all) - 1) for si in step_indices]
         actions = actions_all[safe_indices]
+        tactile = None
+        if self.use_tactile:
+            tactile_all = _npz_array(npz_data, self.tactile_key)
+            tactile = tactile_all[safe_indices]
         assert (
             actions.shape[1] == self.action_dim
         ), f"Unexpected action dim: {actions.shape[1]} != {self.action_dim}"
         actions = torch.from_numpy(actions).float()
-        return frames, actions
+        if tactile is None:
+            return frames, actions
+
+        tactile = torch.from_numpy(_prepare_tactile_array(tactile)).float()
+        if self.tactile_dim > 0:
+            assert (
+                tactile.shape[1] == self.tactile_dim
+            ), f"Unexpected tactile dim: {tactile.shape[1]} != {self.tactile_dim}"
+        return frames, actions, tactile

@@ -24,6 +24,8 @@ from ..models.base_autoencoder import create_autoencoder, encoder_config_from_ar
 from ..models.model import DiT
 from ..training.diffusion import Diffusion, FlowMatching
 from ..training.utils import (
+    downsample_actions_temporal,
+    downsample_sequence_temporal,
     resolve_adapter_ckpt,
     setup_pixel_decoder_for_val,
     load_frozen_adapter_weights,
@@ -51,6 +53,7 @@ def _load_dit_checkpoint(
     in_channels: int,
     device: torch.device,
     action_dim_override: int | None = None,
+    tactile_dim_override: int | None = None,
 ) -> torch.nn.Module:
     """Load DiT model from checkpoint, returning EMA weights."""
     model = DiT(
@@ -60,6 +63,7 @@ def _load_dit_checkpoint(
         num_layers=args.layers,
         num_heads=args.heads,
         action_dim=action_dim_override if action_dim_override is not None else args.action_dim,
+        tactile_dim=tactile_dim_override if tactile_dim_override is not None else getattr(args, "tactile_dim", 0),
         max_frames=args.n_frames,
         action_dropout_prob=0.0,  # no dropout at eval
         wide_head=args.wide_head,
@@ -106,6 +110,15 @@ def _decode_latents(
     if not is_identity:
         latents = adapter.decode(latents)
     return autoencoder.decode(latents)
+
+
+def _unpack_batch(batch):
+    if len(batch) == 2:
+        x, actions = batch
+        return x, actions, None
+    if len(batch) == 3:
+        return batch
+    raise ValueError(f"Expected batch of length 2 or 3, got {len(batch)}")
 
 
 def _compute_reconstruction_ceiling(
@@ -191,11 +204,20 @@ def evaluate_model(args) -> Dict:
 
     # Match training: temporal encoders (VJEPA, Qwen) concatenate actions pairwise
     temporal_ds = getattr(autoencoder, "temporal_downsample_factor", 1)
+    if getattr(args, "use_tactile", False) and getattr(args, "tactile_dim", 0) <= 0:
+        raise ValueError("--tactile_dim must be > 0 when --use_tactile True")
     effective_action_dim = args.action_dim * temporal_ds
+    effective_tactile_dim = getattr(args, "tactile_dim", 0) * temporal_ds
 
     logger.info("Loading DiT checkpoint: %s", args.checkpoint_path)
-    model = _load_dit_checkpoint(args.checkpoint_path, args, in_channels, device,
-                                 action_dim_override=effective_action_dim)
+    model = _load_dit_checkpoint(
+        args.checkpoint_path,
+        args,
+        in_channels,
+        device,
+        action_dim_override=effective_action_dim,
+        tactile_dim_override=effective_tactile_dim,
+    )
 
     # ── Diffusion ────────────────────────────────────────────────────────
     shift = 1.0
@@ -269,12 +291,15 @@ def evaluate_model(args) -> Dict:
             num_eval_samples, args.batch_size, args.n_frames, args.num_history,
         )
 
-        for batch_idx, (x, actions) in enumerate(tqdm(test_loader, desc="Evaluating")):
+        for batch_idx, batch in enumerate(tqdm(test_loader, desc="Evaluating")):
             if samples_processed >= num_eval_samples:
                 break
 
+            x, actions, tactile = _unpack_batch(batch)
             x = x.to(device)
             actions = actions.to(device)
+            if tactile is not None:
+                tactile = tactile.to(device)
             B = x.shape[0]
 
             # Keep raw GT pixels for metric computation (before any encoding)
@@ -290,6 +315,11 @@ def evaluate_model(args) -> Dict:
                 else:
                     z_adapted = z
 
+                if temporal_ds > 1:
+                    actions = downsample_actions_temporal(actions, temporal_ds)
+                    if tactile is not None:
+                        tactile = downsample_sequence_temporal(tactile, temporal_ds)
+
                 # Generate
                 samples_latent = diffusion.generate(
                     model,
@@ -300,6 +330,7 @@ def evaluate_model(args) -> Dict:
                     window_len=getattr(args, "window_len", None),
                     horizon=getattr(args, "horizon", 1),
                     cfg=cfg,
+                    tactile=tactile,
                 )
 
                 # Decode generated latents to pixels

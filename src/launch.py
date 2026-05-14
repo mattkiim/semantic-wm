@@ -33,6 +33,14 @@ def get_configs():
     parser.add_argument("--subset_names", type=str, default="bridge_v2")
     parser.add_argument("--action_dim", type=int, default=7,
                         help="Action dimensionality (7 for combined_v3, 10 for bridge_v2 MP4).")
+    parser.add_argument("--use_tactile", type=lambda x: x.lower() == "true", default=False,
+                        help="Condition the DiT on per-frame tactile vectors when available.")
+    parser.add_argument("--tactile_dim", type=int, default=0,
+                        help="Tactile vector dimensionality. Values > 0 enable tactile conditioning.")
+    parser.add_argument("--h5_tactile_key", type=str, default="cam_tactile_patch_embd",
+                        help="HDF5 dataset key for tactile vectors inside each trajectory group.")
+    parser.add_argument("--tactile_npz_key", type=str, default="tactile",
+                        help="NPZ key for tactile vectors in MP4 datasets.")
     parser.add_argument("--num_workers", type=int, default=6)
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--timesteps", type=int, default=1000)

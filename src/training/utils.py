@@ -411,3 +411,12 @@ def downsample_actions_temporal(actions: torch.Tensor, factor: int) -> torch.Ten
         f"Temporal dim T={T} is not divisible by downsample factor={factor}"
     )
     return actions.reshape(B, T // factor, factor * D)
+
+
+def downsample_sequence_temporal(sequence: torch.Tensor, factor: int) -> torch.Tensor:
+    """Concatenate consecutive per-frame vectors after temporal downsampling."""
+    B, T, D = sequence.shape
+    assert T % factor == 0, (
+        f"Temporal dim T={T} is not divisible by downsample factor={factor}"
+    )
+    return sequence.reshape(B, T // factor, factor * D)

@@ -35,6 +35,7 @@ from .utils import (
     load_frozen_adapter_weights,
     setup_pixel_decoder_for_val,
     downsample_actions_temporal,
+    downsample_sequence_temporal,
 )
 
 # Head architecture constants (kept here rather than as magic numbers inline)
@@ -133,7 +134,11 @@ def train_wm(args) -> None:
             "effective_num_history=%d",
             temporal_ds, args.action_dim * temporal_ds, args.num_history // temporal_ds,
         )
+    if getattr(args, "use_tactile", False) and getattr(args, "tactile_dim", 0) <= 0:
+        raise ValueError("--tactile_dim must be > 0 when --use_tactile True")
+
     effective_action_dim = args.action_dim * temporal_ds
+    effective_tactile_dim = getattr(args, "tactile_dim", 0) * temporal_ds
     effective_num_history = args.num_history // temporal_ds
 
     adapter_cfg, adapter_ckpt_data = resolve_adapter_ckpt(args, device)
@@ -153,7 +158,13 @@ def train_wm(args) -> None:
     in_channels = adapter.latent_dim
     is_identity_adapter = isinstance(adapter, IdentityAdapter)
 
-    model = _build_model(args, in_channels, device, action_dim=effective_action_dim)
+    model = _build_model(
+        args,
+        in_channels,
+        device,
+        action_dim=effective_action_dim,
+        tactile_dim=effective_tactile_dim,
+    )
     # Transfer learning: --pretrained_checkpoint is an alias for single-view→multi-view
     pretrained_ckpt = getattr(args, "pretrained_checkpoint", None)
     if pretrained_ckpt and not args.dit_pretrained_backbone_path:
@@ -257,13 +268,14 @@ def train_wm(args) -> None:
     # ── Training loop ─────────────────────────────────────────────────────────
     while train_steps < max_train_steps:
         try:
-            x, actions = next(train_iter)
+            batch = next(train_iter)
         except StopIteration:
             current_epoch += 1
             if train_sampler is not None:
                 train_sampler.set_epoch(current_epoch)
             train_iter = iter(train_loader)
-            x, actions = next(train_iter)
+            batch = next(train_iter)
+        x, actions, tactile = _unpack_batch(batch)
 
         # Unfreeze backbone after freeze period
         if backbone_frozen and train_steps >= freeze_backbone_steps:
@@ -273,6 +285,8 @@ def train_wm(args) -> None:
                 logging.info("Unfreezing backbone at step %d", train_steps)
 
         x, actions = x.to(device), actions.to(device)
+        if tactile is not None:
+            tactile = tactile.to(device)
         with torch.autocast(device_type="cuda", dtype=precision):
             if num_views > 1:
                 # x: (B, V, T, H, W, C) -> encode each view independently
@@ -292,7 +306,15 @@ def train_wm(args) -> None:
                         x = x[0]
             if temporal_ds > 1:
                 actions = downsample_actions_temporal(actions, temporal_ds)
-            loss = diffusion.loss_fn(model, x, actions, num_history=effective_num_history)
+                if tactile is not None:
+                    tactile = downsample_sequence_temporal(tactile, temporal_ds)
+            loss = diffusion.loss_fn(
+                model,
+                x,
+                actions,
+                num_history=effective_num_history,
+                tactile=tactile,
+            )
 
         optimizer.zero_grad()
         loss.backward()
@@ -358,9 +380,14 @@ def train_wm(args) -> None:
 
 
 def _build_model(
-    args, in_channels: int, device, action_dim: int | None = None
+    args,
+    in_channels: int,
+    device,
+    action_dim: int | None = None,
+    tactile_dim: int | None = None,
 ) -> torch.nn.Module:
     act_dim = action_dim if action_dim is not None else args.action_dim
+    tact_dim = tactile_dim if tactile_dim is not None else getattr(args, "tactile_dim", 0)
     mv = getattr(args, "num_views", 1)
     if args.model_type == "dit":
         return DiT(
@@ -378,8 +405,18 @@ def _build_model(
             decoder_heads=_DECODER_HEADS,
             num_views=mv,
             temporal_mode=getattr(args, "temporal_mode", "factored"),
+            tactile_dim=tact_dim,
         ).to(device)
     raise ValueError(f"Unknown model type: {args.model_type}")
+
+
+def _unpack_batch(batch):
+    if len(batch) == 2:
+        x, actions = batch
+        return x, actions, None
+    if len(batch) == 3:
+        return batch
+    raise ValueError(f"Expected batch of length 2 or 3, got {len(batch)}")
 
 
 def _load_pretrained_backbone(model, args, device) -> None:

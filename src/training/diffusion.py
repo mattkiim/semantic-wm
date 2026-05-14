@@ -101,7 +101,12 @@ class Diffusion(nn.Module):
         return alphas_cumprod.sqrt() * x + (1 - alphas_cumprod).sqrt() * noise
 
     def loss_fn(
-        self, model: nn.Module, x: torch.Tensor, actions: torch.Tensor, num_history: int = 0
+        self,
+        model: nn.Module,
+        x: torch.Tensor,
+        actions: torch.Tensor,
+        num_history: int = 0,
+        tactile: torch.Tensor | None = None,
     ) -> torch.Tensor:
         B, T, H, W, C = x.shape
         B, T, D = actions.shape
@@ -110,7 +115,7 @@ class Diffusion(nn.Module):
         noise = torch.randn_like(x)
 
         x_t = self.q_sample(x, t, noise)
-        pred_v = model(x_t, t, actions)
+        pred_v = model(x_t, t, actions, tactile=tactile)
 
         # Build target v
         alphas_cumprod = self.alphas_cumprod[t.reshape(-1)].view(B, T, 1, 1, 1)
@@ -126,6 +131,7 @@ class Diffusion(nn.Module):
         actions: torch.Tensor,
         t_idx: torch.Tensor,
         t_next_idx: torch.Tensor,
+        tactile: torch.Tensor | None = None,
         cfg: float = 1.0,
     ) -> torch.Tensor:
         # Derived from
@@ -159,9 +165,11 @@ class Diffusion(nn.Module):
         ).view(B, T, 1, 1, 1)
         c = (1 - alphas_next_cumprod).sqrt()
 
-        v_pred_cond = model(x, clipped_t, actions)
+        v_pred_cond = model(x, clipped_t, actions, tactile=tactile)
         if cfg != 1.0:
-            v_pred_null = model(x, clipped_t, model.get_null_cond(actions))
+            v_pred_null = model(
+                x, clipped_t, model.get_null_cond(actions), tactile=tactile
+            )
             v_pred = (1 - cfg) * v_pred_null + cfg * v_pred_cond
         else:
             v_pred = v_pred_cond
@@ -196,6 +204,7 @@ class Diffusion(nn.Module):
         horizon: int = 1,
         window_len: int | None = None,
         cfg: float = 0.0,
+        tactile: torch.Tensor | None = None,
     ) -> torch.Tensor:
         B, T, H, W, C = x.shape
         curr_frame = 0
@@ -240,6 +249,11 @@ class Diffusion(nn.Module):
                     actions[:, start_frame : curr_frame + horizon],
                     t[:, start_frame:],
                     t_next[:, start_frame:],
+                    tactile=(
+                        tactile[:, start_frame : curr_frame + horizon]
+                        if tactile is not None
+                        else None
+                    ),
                     cfg=cfg,
                 )
 
@@ -304,6 +318,7 @@ class FlowMatching(nn.Module):
         x: torch.Tensor,
         actions: torch.Tensor,
         num_history: int = 0,
+        tactile: torch.Tensor | None = None,
     ) -> torch.Tensor:
         B, T, H, W, C = x.shape
 
@@ -345,7 +360,7 @@ class FlowMatching(nn.Module):
             if not getattr(model, "use_normalized_t", False):
                 t_input = t * self.timesteps
 
-            v_t = model(x_t, t_input, actions)
+            v_t = model(x_t, t_input, actions, tactile=tactile)
 
             # Loss only on future frames (history frames are context, not prediction targets)
             v_future = v_t[:, num_history:]
@@ -360,7 +375,7 @@ class FlowMatching(nn.Module):
             t_input = t
             if not getattr(model, "use_normalized_t", False):
                 t_input = t * self.timesteps
-            v_t = model(x_t, t_input, actions)
+            v_t = model(x_t, t_input, actions, tactile=tactile)
 
             loss = F.mse_loss(v_t, x_1 - x)
         return loss
@@ -375,6 +390,7 @@ class FlowMatching(nn.Module):
         horizon: int = 1,
         window_len: int | None = None,
         cfg: float = 0.0,
+        tactile: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert horizon == 1
         assert window_len is None
@@ -422,6 +438,11 @@ class FlowMatching(nn.Module):
                     x_pred[:, start_frame:],
                     t_input,
                     actions[:, start_frame : curr_frame + 1],
+                    tactile=(
+                        tactile[:, start_frame : curr_frame + 1]
+                        if tactile is not None
+                        else None
+                    ),
                 )
                 if cfg >= 1.0:
                     # Pure conditional — no need to evaluate the null model
@@ -431,6 +452,11 @@ class FlowMatching(nn.Module):
                         x_pred[:, start_frame:],
                         t_input,
                         model.get_null_cond(actions)[:, start_frame : curr_frame + 1],
+                        tactile=(
+                            tactile[:, start_frame : curr_frame + 1]
+                            if tactile is not None
+                            else None
+                        ),
                     )
                     v_pred = (1 - cfg) * v_null + cfg * v_cond
                 # take a step in the backwards velocity direction

@@ -131,8 +131,19 @@ def validate_step(
             else:
                 samples_latent_dec = samples_latent
 
+            gt_pixels = None
             if use_pixel_dec:
                 samples = pixel_decoder(samples_latent_dec)
+                # Decode GT latent through pixel decoder for a proper RGB side-by-side.
+                # val_x may be embeddings (precomputed encoder), not raw RGB frames.
+                gt_latent_dec = einops.rearrange(
+                    val_latent_adapted, "b t h (v w) c -> (b v) t h w c", v=num_views
+                ) if num_views > 1 else val_latent_adapted
+                gt_pixels = pixel_decoder(gt_latent_dec)
+                if num_views > 1:
+                    gt_pixels = einops.rearrange(
+                        gt_pixels, "(b v) t h w c -> b t h (v w) c", v=num_views
+                    )
             elif has_encoder_decoder:
                 if not is_identity:
                     samples_high = adapter.decode(samples_latent_dec)
@@ -154,9 +165,12 @@ def validate_step(
                     samples, "(b v) t h w c -> b t h (v w) c", v=num_views
                 )
 
-    # Use actual GT frames for metrics, not autoencoder reconstruction.
-    # val_x is (B, T, H, W, C) in [0, 1] at original resolution (e.g. 256×256).
-    gt_np = val_x.float().clamp(0, 1).cpu().numpy()
+    # Use pixel-decoder GT when val_x is embeddings (precomputed encoder),
+    # otherwise use the raw input frames directly.
+    if gt_pixels is not None:
+        gt_np = gt_pixels.float().clamp(0, 1).cpu().numpy()
+    else:
+        gt_np = val_x.float().clamp(0, 1).cpu().numpy()
 
     # Log MSE to WandB
     wandb.log({"val/mse_latent": float(mse.item())}, step=total_samples_seen)
@@ -164,7 +178,7 @@ def validate_step(
     # Resize decoded samples to match GT resolution if needed (pixel decoder
     # output resolution may differ from the original input resolution).
     samples_for_vis = samples.float().clamp(0, 1)
-    gt_h, gt_w = val_x.shape[2], val_x.shape[3]
+    gt_h, gt_w = gt_np.shape[2], gt_np.shape[3]
     sam_h, sam_w = samples_for_vis.shape[2], samples_for_vis.shape[3]
     if (sam_h, sam_w) != (gt_h, gt_w):
         B_s, T_s = samples_for_vis.shape[:2]
@@ -225,6 +239,110 @@ def _unpack_batch(batch):
     if len(batch) == 3:
         return batch
     raise ValueError(f"Expected batch of length 2 or 3, got {len(batch)}")
+
+
+def validate_spill(
+    model,
+    ema,
+    autoencoder,
+    adapter,
+    diffusion,
+    spill_loader,
+    device,
+    precision,
+    args,
+    total_samples_seen,
+    checkpoint_dir,
+    pixel_decoder=None,
+):
+    """Run validation over all spill windows and log aggregate metrics."""
+    from ..models.adapters import IdentityAdapter
+
+    model.eval()
+    ema.eval()
+    all_psnr, all_ssim, all_mse = [], [], []
+
+    temporal_ds = getattr(autoencoder, "temporal_downsample_factor", 1)
+    n_ctx = max(args.num_history // temporal_ds, 1)
+    effective_skip = args.num_history // temporal_ds
+    is_identity = isinstance(adapter, IdentityAdapter)
+    has_encoder_decoder = getattr(autoencoder, "has_decoder", True)
+    use_pixel_dec = (
+        (getattr(args, "use_pixel_decoder_for_val", False) or not has_encoder_decoder)
+        and pixel_decoder is not None
+    )
+
+    with torch.no_grad():
+        for batch in spill_loader:
+            val_x, val_actions, val_tactile = _unpack_batch(batch)
+            val_x = val_x.to(device)
+            val_actions = val_actions.to(device)
+            if val_tactile is not None:
+                val_tactile = val_tactile.to(device)
+
+            with torch.autocast(device_type="cuda", dtype=precision):
+                val_latent = autoencoder.encode(val_x)
+                if not is_identity:
+                    val_latent_adapted = adapter.encode(val_latent)
+                    if isinstance(val_latent_adapted, tuple):
+                        val_latent_adapted = val_latent_adapted[0]
+                else:
+                    val_latent_adapted = val_latent
+
+                if temporal_ds > 1:
+                    from .utils import downsample_actions_temporal, downsample_sequence_temporal
+                    val_actions = downsample_actions_temporal(val_actions, temporal_ds)
+                    if val_tactile is not None:
+                        val_tactile = downsample_sequence_temporal(val_tactile, temporal_ds)
+
+                samples_latent = diffusion.generate(
+                    ema, val_latent_adapted, val_actions,
+                    n_context_frames=n_ctx,
+                    n_frames=val_latent_adapted.shape[1],
+                    window_len=args.window_len,
+                    horizon=args.horizon,
+                    cfg=args.cfg,
+                    tactile=val_tactile,
+                )
+                mse = F.mse_loss(samples_latent, val_latent_adapted).item()
+                all_mse.append(mse)
+
+                if use_pixel_dec:
+                    samples = pixel_decoder(samples_latent)
+                    gt_pixels = pixel_decoder(val_latent_adapted)
+                    gt_np = gt_pixels.float().clamp(0, 1).cpu().numpy()
+                elif has_encoder_decoder:
+                    if not is_identity:
+                        samples = autoencoder.decode(adapter.decode(samples_latent))
+                    else:
+                        samples = autoencoder.decode(samples_latent)
+                    gt_np = val_x.float().clamp(0, 1).cpu().numpy()
+                else:
+                    continue
+
+                samples_np = samples.float().clamp(0, 1).cpu().numpy()
+                if samples_np.shape[1] < gt_np.shape[1]:
+                    indices = np.linspace(0, gt_np.shape[1] - 1, samples_np.shape[1]).astype(int)
+                    gt_np = gt_np[:, indices]
+
+                metrics = calculate_image_metrics(samples_np, gt_np, skip_frames=effective_skip)
+                all_psnr.append(metrics["psnr"])
+                all_ssim.append(metrics["ssim"])
+
+    if all_psnr:
+        wandb.log(
+            {
+                "val_spill/psnr": float(np.mean(all_psnr)),
+                "val_spill/ssim": float(np.mean(all_ssim)),
+                "val_spill/mse_latent": float(np.mean(all_mse)),
+            },
+            step=total_samples_seen,
+        )
+        print(
+            f"Spill validation at {total_samples_seen} samples: "
+            f"MSE={np.mean(all_mse):.6f}, PSNR={np.mean(all_psnr):.2f}, SSIM={np.mean(all_ssim):.4f} "
+            f"({len(all_psnr)} spill windows)"
+        )
 
 
 def calculate_image_metrics(generated_frames, gt_frames, skip_frames=0):

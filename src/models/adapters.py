@@ -214,6 +214,7 @@ class DiagonalGaussian(nn.Module):
         self, x: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         mu, logvar = x.chunk(2, dim=-1)
+        logvar = logvar.clamp(-30.0, 20.0)  # prevent exp() overflow / gradient explosion
         if self.training:  # set/cleared by .train() / .eval() on parent module
             std = (0.5 * logvar).exp()
             z = mu + std * torch.randn_like(std)

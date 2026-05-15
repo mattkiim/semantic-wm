@@ -92,6 +92,8 @@ def train_adapter(args) -> None:
     precision = torch.bfloat16 if args.precision == "bfloat16" else torch.float16
     local_rank, rank, world_size, distributed = init_distributed()
     device = torch.device(f"cuda:{local_rank}" if distributed else "cuda")
+    if args.encoder_type == "precomputed" and getattr(args, "use_pixel_decoder", False):
+        args.return_rgb_target = True
 
     # ── Checkpoint dir ────────────────────────────────────────────────────────
     if args.checkpoint_dir is None:
@@ -165,8 +167,9 @@ def train_adapter(args) -> None:
 
     adapter = create_adapter(adapter_config_from_args(args), input_dim=autoencoder.latent_dim).to(device)
     adapter.train()
-    adapter = torch.compile(adapter, mode="default")  # type: ignore[assignment]
-    if hasattr(autoencoder, "encode"):
+    if getattr(args, "compile_models", True):
+        adapter = torch.compile(adapter, mode="default")  # type: ignore[assignment]
+    if getattr(args, "compile_models", True) and hasattr(autoencoder, "encode"):
         autoencoder.encode = torch.compile(autoencoder.encode, mode="default")  # type: ignore[assignment]
 
     pixel_decoder = None
@@ -175,7 +178,8 @@ def train_adapter(args) -> None:
         pd_config = pixel_decoder_config_from_args(args)
         pixel_decoder = create_pixel_decoder(pd_config).to(device)
         pixel_decoder.train()
-        pixel_decoder = torch.compile(pixel_decoder, mode="default")  # type: ignore[assignment]
+        if getattr(args, "compile_models", True):
+            pixel_decoder = torch.compile(pixel_decoder, mode="default")  # type: ignore[assignment]
         pixel_decoder_no_ddp = pixel_decoder
 
     lpips_vgg = None
@@ -291,15 +295,18 @@ def train_adapter(args) -> None:
     # ── Training loop ─────────────────────────────────────────────────────────
     while train_steps < max_train_steps:
         try:
-            x, _ = next(train_iter)
+            batch = next(train_iter)
         except StopIteration:
             current_epoch += 1
             if train_sampler is not None:
                 train_sampler.set_epoch(current_epoch)
             train_iter = iter(train_loader)
-            x, _ = next(train_iter)
+            batch = next(train_iter)
 
+        x, pixel_target = _unpack_adapter_batch(batch)
         x = x.to(device)
+        if pixel_target is not None:
+            pixel_target = pixel_target.to(device)
 
         # ── KL warmup schedule ────────────────────────────────────────────
         kl_warmup_steps = int(kl_warmup_fraction * max_train_steps) if kl_warmup_fraction > 0 else 0
@@ -337,9 +344,14 @@ def train_adapter(args) -> None:
             x_rec = None
 
             if pixel_decoder is not None:
+                if args.encoder_type == "precomputed" and pixel_target is None:
+                    raise ValueError(
+                        "Precomputed adapter pixel decoding needs RGB targets. "
+                        "Set --precomputed_rgb_target_key to an HDF5 camera key."
+                    )
                 z_l_pd = z_l.detach() if stage == "svae" else z_l
                 x_rec = pixel_decoder(z_l_pd)
-                x_target = x.float()
+                x_target = pixel_target.float() if pixel_target is not None else x.float()
                 if x_rec.shape[2:4] != x_target.shape[2:4]:
                     B_, T_, H_o, W_o, C_ = x_rec.shape
                     x_rec = (
@@ -376,6 +388,7 @@ def train_adapter(args) -> None:
         # ── Generator step (discriminator GAN loss on generator) ──────────
         disc_active = use_discriminator and discriminator is not None and total_samples_seen >= disc_start_samples
         if disc_active and x_rec is not None:
+            requires_grad(discriminator, False)
             b_g, t_g, h_g, w_g, c_g = x_rec.shape
             fake_nchw = x_rec.reshape(b_g * t_g, h_g, w_g, c_g).permute(0, 3, 1, 2).float()
             fake_logits = discriminator(fake_nchw)
@@ -396,6 +409,7 @@ def train_adapter(args) -> None:
 
         # ── Discriminator step ────────────────────────────────────────────
         if disc_active and x_rec is not None and disc_optimizer is not None:
+            requires_grad(discriminator, True)
             disc_optimizer.zero_grad()
             with torch.no_grad():
                 b_d, t_d, h_d, w_d, c_d = x_rec.shape
@@ -407,8 +421,10 @@ def train_adapter(args) -> None:
             loss_disc_val.backward()
             disc_optimizer.step()
 
-        lr_scheduler.step()
+        if disc_optimizer is not None:
+            requires_grad(discriminator, True)
 
+        lr_scheduler.step()
         running_loss += loss.item()
         running_mse += loss_mse.item()
         running_cos += loss_cos.item()
@@ -515,3 +531,20 @@ def train_adapter(args) -> None:
         dist.destroy_process_group()
     if rank == 0 and pbar:
         pbar.close()
+
+
+def _unpack_adapter_batch(batch):
+    """Return (feature_input, optional_rgb_target) from adapter dataloader batches."""
+    if len(batch) == 2:
+        x, _actions = batch
+        return x, None
+    if len(batch) == 3:
+        x, _actions, third = batch
+        # RGB video targets are (B, T, H, W, 3); tactile is lower-rank here.
+        if third.dim() >= 5 and third.shape[-1] == 3:
+            return x, third
+        return x, None
+    if len(batch) == 4:
+        x, _actions, _tactile, rgb_target = batch
+        return x, rgb_target
+    raise ValueError(f"Expected adapter batch length 2, 3, or 4; got {len(batch)}")

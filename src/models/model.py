@@ -489,6 +489,7 @@ class DiT(nn.Module):
         num_views: int = 1,
         temporal_mode: str = "factored",
         tactile_dim: int = 0,
+        tactile_dropout_prob: float = 0.0,
     ) -> None:
         super().__init__()
         self.in_channels = in_channels
@@ -496,6 +497,7 @@ class DiT(nn.Module):
         self.action_dim = action_dim
         self.tactile_dim = tactile_dim
         self.action_dropout_prob = action_dropout_prob
+        self.tactile_dropout_prob = tactile_dropout_prob
         self.wide_head = wide_head
         self.num_views = num_views
 
@@ -625,6 +627,12 @@ class DiT(nn.Module):
         if self.tactile_embedder is not None:
             if tactile is None:
                 raise ValueError("DiT was configured with tactile_dim > 0 but no tactile tensor was provided")
+            if self.training and self.tactile_dropout_prob > 0:
+                should_drop_tactile = (
+                    torch.rand((B, 1, 1), device=tactile.device)
+                    < self.tactile_dropout_prob
+                )
+                tactile = torch.where(should_drop_tactile, torch.zeros_like(tactile), tactile)
             tactile_cond = self.tactile_embedder(tactile)
 
         return time_cond, self.action_embedder(action), tactile_cond

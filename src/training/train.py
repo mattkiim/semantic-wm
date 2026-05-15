@@ -406,6 +406,7 @@ def _build_model(
             num_views=mv,
             temporal_mode=getattr(args, "temporal_mode", "factored"),
             tactile_dim=tact_dim,
+            tactile_dropout_prob=getattr(args, "tactile_dropout_prob", 0.0),
         ).to(device)
     raise ValueError(f"Unknown model type: {args.model_type}")
 

@@ -49,6 +49,8 @@ def get_configs():
     parser.add_argument("--ema_decay", type=float, default=0.9995)
     parser.add_argument("--num_epochs", type=int, default=100)
     parser.add_argument("--action_dropout_prob", type=float, default=0.1)
+    parser.add_argument("--tactile_dropout_prob", type=float, default=0.0,
+                        help="Probability of zeroing tactile conditioning during training.")
     parser.add_argument(
         "--objective",
         type=str,

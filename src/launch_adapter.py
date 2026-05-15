@@ -67,6 +67,8 @@ def get_configs():
                         help="Patch grid width for pre-computed embeddings.")
     parser.add_argument("--h5_embedding_key", type=str, default="cam_0_patch_embd",
                         help="HDF5 dataset key for pre-computed patch embeddings.")
+    parser.add_argument("--precomputed_rgb_target_key", type=str, default="camera_0",
+                        help="HDF5 camera key to use as RGB target when training a pixel decoder from pre-computed embeddings.")
     parser.add_argument("--vae_model_path", type=str, default=None,
                         help="HuggingFace repo or local path for the VAE encoder "
                              "(default: stabilityai/sd-vae-ft-mse).")
@@ -229,6 +231,8 @@ def get_configs():
     parser.add_argument("--warmup_epochs", type=int, default=1)
     parser.add_argument("--min_lr_ratio", type=float, default=0.9)
     parser.add_argument("--precision", type=str, default="bfloat16")
+    parser.add_argument("--compile_models", type=lambda x: x.lower() == "true", default=False,
+                        help="Compile adapter, encoder encode path, and pixel decoder with torch.compile.")
 
     # ---- Logging / checkpoints ----------------------------------------------
     parser.add_argument("--checkpoint_dir", type=str, default=None)

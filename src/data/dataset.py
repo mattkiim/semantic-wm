@@ -71,7 +71,10 @@ class H5EmbeddingDataset(Dataset):
         self.use_tactile = _tactile_enabled(args)
         self.tactile_dim = int(getattr(args, "tactile_dim", 0))
         self.tactile_key = str(getattr(args, "h5_tactile_key", "cam_tactile_patch_embd"))
+        self.return_rgb_target = bool(getattr(args, "return_rgb_target", False))
+        self.rgb_target_key = str(getattr(args, "precomputed_rgb_target_key", "camera_0"))
         self.variable_history_sampling = args.variable_history_sampling
+        self.transform = transforms.Resize((int(args.input_h), int(args.input_w)))
 
         self._h5_file = None
 
@@ -85,6 +88,10 @@ class H5EmbeddingDataset(Dataset):
                     if self.tactile_key not in f[k]:
                         continue
                     length = min(length, int(f[k][self.tactile_key].shape[0]))
+                if self.return_rgb_target:
+                    if self.rgb_target_key not in f[k]:
+                        continue
+                    length = min(length, int(f[k][self.rgb_target_key].shape[0]))
                 if length >= self.clip_len:
                     valid_keys.append(k)
                     valid_lengths.append(length)
@@ -152,6 +159,11 @@ class H5EmbeddingDataset(Dataset):
             if self.use_tactile
             else None
         )
+        rgb_target = (
+            traj[self.rgb_target_key][unique_sorted.tolist()][inverse]
+            if self.return_rgb_target
+            else None
+        )
 
         assert (
             actions.shape[1] == self.action_dim
@@ -161,14 +173,25 @@ class H5EmbeddingDataset(Dataset):
         emb = emb.reshape(self.n_frames, self.patch_h, self.patch_w, -1)
 
         actions = torch.from_numpy(np.array(actions)).float()
-        if tactile is None:
+        if rgb_target is not None:
+            rgb_target = torch.from_numpy(np.array(rgb_target)).float()
+            rgb_target = einops.rearrange(rgb_target, "t h w c -> t c h w")
+            rgb_target = self.transform(rgb_target)
+            rgb_target = einops.rearrange(rgb_target, "t c h w -> t h w c")
+
+        if tactile is None and rgb_target is None:
             return emb, actions
+
+        if tactile is None:
+            return emb, actions, rgb_target
 
         tactile = torch.from_numpy(_prepare_tactile_array(tactile)).float()
         if self.tactile_dim > 0:
             assert (
                 tactile.shape[1] == self.tactile_dim
             ), f"Unexpected tactile dim: {tactile.shape[1]} != {self.tactile_dim}"
+        if rgb_target is not None:
+            return emb, actions, tactile, rgb_target
         return emb, actions, tactile
 
 

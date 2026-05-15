@@ -114,10 +114,13 @@ def validate_adapter(
     if has_decoder:
         autoencoder.decoder.to(device)
 
-    for i, (x, _) in enumerate(val_loader):
+    for i, batch in enumerate(val_loader):
         if i >= max_batches:
             break
+        x, pixel_target = _unpack_adapter_batch(batch)
         x = x.to(device)
+        if pixel_target is not None:
+            pixel_target = pixel_target.to(device)
         x_orig_px = x_rec_px = x_rec_direct_px = None
 
         with torch.autocast(device_type="cuda", dtype=precision):
@@ -144,8 +147,9 @@ def validate_adapter(
 
             if pixel_decoder is not None:
                 x_rec_direct_px = pixel_decoder(z_l)
-                if x_rec_direct_px.shape[2:4] != x.shape[2:4]:
-                    x_rec_direct_px = _resize_to(x_rec_direct_px, x.shape[2:4])
+                target_px = pixel_target if pixel_target is not None else x
+                if x_rec_direct_px.shape[2:4] != target_px.shape[2:4]:
+                    x_rec_direct_px = _resize_to(x_rec_direct_px, target_px.shape[2:4])
 
         if has_decoder and x_orig_px is not None and x_rec_px is not None:
             m = calculate_image_metrics(
@@ -156,15 +160,17 @@ def validate_adapter(
             all_ssim.append(m["ssim"])
 
         if x_rec_direct_px is not None:
+            target_px = pixel_target if pixel_target is not None else x
             m = calculate_image_metrics(
-                x.float().clamp(0, 1).cpu().numpy(),
+                target_px.float().clamp(0, 1).cpu().numpy(),
                 x_rec_direct_px.float().clamp(0, 1).cpu().numpy(),
             )
             all_psnr_direct.append(m["psnr"])
             all_ssim_direct.append(m["ssim"])
 
         if save_video and not video_logged:
-            panels = [x.float().clamp(0, 1).cpu().numpy()]
+            target_px = pixel_target if pixel_target is not None else x
+            panels = [target_px.float().clamp(0, 1).cpu().numpy()]
             if x_rec_px is not None:
                 panels.append(x_rec_px.float().clamp(0, 1).cpu().numpy())
             if x_rec_direct_px is not None:
@@ -212,16 +218,20 @@ def log_reconstruction_video(
         return
 
     try:
-        x, _ = next(iter(val_loader))
+        batch = next(iter(val_loader))
+        x, pixel_target = _unpack_adapter_batch(batch)
         x = x.to(device)
-        target_h, target_w = x.shape[2], x.shape[3]
+        if pixel_target is not None:
+            pixel_target = pixel_target.to(device)
+        target_px = pixel_target if pixel_target is not None else x
+        target_h, target_w = target_px.shape[2], target_px.shape[3]
 
         with torch.no_grad(), torch.autocast(device_type="cuda", dtype=precision):
             f_h = autoencoder.encode(x)
             enc_out = adapter.encode(f_h)
             z_l = enc_out[0] if isinstance(enc_out, tuple) else enc_out
 
-            panels = [x.float().clamp(0, 1).cpu().numpy()]
+            panels = [target_px.float().clamp(0, 1).cpu().numpy()]
 
             if has_ae_decoder:
                 autoencoder.decoder.to(device)
@@ -241,6 +251,22 @@ def log_reconstruction_video(
         log_comparison_video(panels, checkpoint_dir, total_samples_seen)
     except Exception as e:
         logger.warning("Skipping vis video: %s", e)
+
+
+def _unpack_adapter_batch(batch):
+    """Return (feature_input, optional_rgb_target) from adapter dataloader batches."""
+    if len(batch) == 2:
+        x, _actions = batch
+        return x, None
+    if len(batch) == 3:
+        x, _actions, third = batch
+        if third.dim() >= 5 and third.shape[-1] == 3:
+            return x, third
+        return x, None
+    if len(batch) == 4:
+        x, _actions, _tactile, rgb_target = batch
+        return x, rgb_target
+    raise ValueError(f"Expected adapter batch length 2, 3, or 4; got {len(batch)}")
 
 
 def log_comparison_video(

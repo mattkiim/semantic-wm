@@ -36,7 +36,6 @@ from .utils import (
     setup_pixel_decoder_for_val,
     downsample_actions_temporal,
     downsample_sequence_temporal,
-    mask_future_conditioning,
 )
 
 # Head architecture constants (kept here rather than as magic numbers inline)
@@ -319,7 +318,6 @@ def train_wm(args) -> None:
                     actions = downsample_actions_temporal(actions, temporal_ds)
                     if tactile is not None:
                         tactile = downsample_sequence_temporal(tactile, temporal_ds)
-                tactile = mask_future_conditioning(tactile, effective_context_frames)
                 loss = diffusion.loss_fn(
                     model,
                     x,

@@ -11,7 +11,6 @@ from ..models.adapters import IdentityAdapter
 from .utils import (
     downsample_actions_temporal,
     downsample_sequence_temporal,
-    mask_future_conditioning,
 )
 
 
@@ -110,8 +109,6 @@ def validate_step(
                     val_tactile = downsample_sequence_temporal(val_tactile, temporal_ds)
             n_ctx = context_frames // temporal_ds
             effective_skip = n_ctx
-            val_tactile = mask_future_conditioning(val_tactile, n_ctx)
-
             samples_latent = diffusion.generate(
                 ema,
                 val_latent_adapted,
@@ -311,8 +308,6 @@ def validate_spill(
                     val_actions = downsample_actions_temporal(val_actions, temporal_ds)
                     if val_tactile is not None:
                         val_tactile = downsample_sequence_temporal(val_tactile, temporal_ds)
-                val_tactile = mask_future_conditioning(val_tactile, n_ctx)
-
                 samples_latent = diffusion.generate(
                     ema, val_latent_adapted, val_actions,
                     n_context_frames=n_ctx,

@@ -26,7 +26,6 @@ from ..training.diffusion import Diffusion, FlowMatching
 from ..training.utils import (
     downsample_actions_temporal,
     downsample_sequence_temporal,
-    mask_future_conditioning,
     resolve_adapter_ckpt,
     setup_pixel_decoder_for_val,
     load_frozen_adapter_weights,
@@ -334,8 +333,6 @@ def evaluate_model(args) -> Dict:
                     actions = downsample_actions_temporal(actions, temporal_ds)
                     if tactile is not None:
                         tactile = downsample_sequence_temporal(tactile, temporal_ds)
-                tactile = mask_future_conditioning(tactile, n_ctx)
-
                 # Generate
                 samples_latent = diffusion.generate(
                     model,

@@ -44,7 +44,7 @@ CUDA_VISIBLE_DEVICES=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python -
   --objective flow_matching \
   --wandb_mode online \
   --wandb_entity mattkiim-learning \
-  --wandb_project_name semantic-wm \
+  --wandb_project_name semantic-wm \    
   --warmup_epochs 100 \
   --num_epochs 4000 \
   --log_every_samples 1000 \

@@ -6,6 +6,26 @@ import einops
 import numpy as np
 
 
+def latest_context_tactile_state(
+    tactile: torch.Tensor | None,
+    context_frames: int,
+) -> torch.Tensor | None:
+    """Select the tactile CLS state from the latest ground-truth context frame."""
+    if tactile is None:
+        return None
+    if context_frames <= 0:
+        raise ValueError(
+            "context_frames must be > 0 when tactile conditioning is enabled"
+        )
+    if tactile.ndim != 3:
+        raise ValueError("tactile must have shape (B, T, tactile_dim)")
+    if tactile.shape[1] < context_frames:
+        raise ValueError(
+            f"tactile sequence length {tactile.shape[1]} is shorter than context_frames={context_frames}"
+        )
+    return tactile[:, context_frames - 1 : context_frames]
+
+
 def truncated_logitnormal_sample(
     shape, mu, sigma, low=0.0, high=1.0, device=None, dtype=None
 ):
@@ -115,7 +135,13 @@ class Diffusion(nn.Module):
         noise = torch.randn_like(x)
 
         x_t = self.q_sample(x, t, noise)
-        pred_v = model(x_t, t, actions, tactile=tactile)
+        tactile_context_frames = num_history if num_history > 0 else T
+        tactile_state = (
+            latest_context_tactile_state(tactile, tactile_context_frames)
+            if tactile is not None
+            else None
+        )
+        pred_v = model(x_t, t, actions, tactile_state=tactile_state)
 
         # Build target v
         alphas_cumprod = self.alphas_cumprod[t.reshape(-1)].view(B, T, 1, 1, 1)
@@ -165,10 +191,10 @@ class Diffusion(nn.Module):
         ).view(B, T, 1, 1, 1)
         c = (1 - alphas_next_cumprod).sqrt()
 
-        v_pred_cond = model(x, clipped_t, actions, tactile=tactile)
+        v_pred_cond = model(x, clipped_t, actions, tactile_state=tactile)
         if cfg != 1.0:
             v_pred_null = model(
-                x, clipped_t, model.get_null_cond(actions), tactile=tactile
+                x, clipped_t, model.get_null_cond(actions), tactile_state=tactile
             )
             v_pred = (1 - cfg) * v_pred_null + cfg * v_pred_cond
         else:
@@ -210,6 +236,7 @@ class Diffusion(nn.Module):
         curr_frame = 0
         x_pred = x[:, :n_context_frames]
         curr_frame += n_context_frames
+        tactile_state = latest_context_tactile_state(tactile, n_context_frames)
 
         pbar = tqdm(total=n_frames, initial=curr_frame, desc="Sampling")
         while curr_frame < n_frames:
@@ -249,11 +276,7 @@ class Diffusion(nn.Module):
                     actions[:, start_frame : curr_frame + horizon],
                     t[:, start_frame:],
                     t_next[:, start_frame:],
-                    tactile=(
-                        tactile[:, start_frame : curr_frame + horizon]
-                        if tactile is not None
-                        else None
-                    ),
+                    tactile=tactile_state,
                     cfg=cfg,
                 )
 
@@ -360,7 +383,12 @@ class FlowMatching(nn.Module):
             if not getattr(model, "use_normalized_t", False):
                 t_input = t * self.timesteps
 
-            v_t = model(x_t, t_input, actions, tactile=tactile)
+            tactile_state = (
+                latest_context_tactile_state(tactile, num_history)
+                if tactile is not None
+                else None
+            )
+            v_t = model(x_t, t_input, actions, tactile_state=tactile_state)
 
             # Loss only on future frames (history frames are context, not prediction targets)
             v_future = v_t[:, num_history:]
@@ -375,7 +403,12 @@ class FlowMatching(nn.Module):
             t_input = t
             if not getattr(model, "use_normalized_t", False):
                 t_input = t * self.timesteps
-            v_t = model(x_t, t_input, actions, tactile=tactile)
+            tactile_state = (
+                latest_context_tactile_state(tactile, T)
+                if tactile is not None
+                else None
+            )
+            v_t = model(x_t, t_input, actions, tactile_state=tactile_state)
 
             loss = F.mse_loss(v_t, x_1 - x)
         return loss
@@ -399,6 +432,7 @@ class FlowMatching(nn.Module):
         curr_frame = 0
         x_pred = x[:, :n_context_frames]
         curr_frame += n_context_frames
+        tactile_state = latest_context_tactile_state(tactile, n_context_frames)
 
         schedule = torch.linspace(
             1.0, 0.0, self.sampling_timesteps + 1, dtype=x.dtype, device=self.device
@@ -438,11 +472,7 @@ class FlowMatching(nn.Module):
                     x_pred[:, start_frame:],
                     t_input,
                     actions[:, start_frame : curr_frame + 1],
-                    tactile=(
-                        tactile[:, start_frame : curr_frame + 1]
-                        if tactile is not None
-                        else None
-                    ),
+                    tactile_state=tactile_state,
                 )
                 if cfg >= 1.0:
                     # Pure conditional — no need to evaluate the null model
@@ -452,11 +482,7 @@ class FlowMatching(nn.Module):
                         x_pred[:, start_frame:],
                         t_input,
                         model.get_null_cond(actions)[:, start_frame : curr_frame + 1],
-                        tactile=(
-                            tactile[:, start_frame : curr_frame + 1]
-                            if tactile is not None
-                            else None
-                        ),
+                        tactile_state=tactile_state,
                     )
                     v_pred = (1 - cfg) * v_null + cfg * v_cond
                 # take a step in the backwards velocity direction

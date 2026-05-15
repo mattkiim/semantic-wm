@@ -426,6 +426,48 @@ class DiTBlock(nn.Module):
         return x
 
 
+class CrossAttention(nn.Module):
+    def __init__(self, dim: int, num_heads: int, use_qknorm: bool = True) -> None:
+        super().__init__()
+        assert dim % num_heads == 0
+        self.num_heads = num_heads
+        self.dim = dim
+        self.q_proj = nn.Linear(dim, dim, bias=False)
+        self.kv_proj = nn.Linear(dim, dim * 2, bias=False)
+        self.out_proj = nn.Linear(dim, dim)
+        self.use_qknorm = use_qknorm
+        if use_qknorm:
+            self.q_norm = nn.RMSNorm(dim // num_heads, elementwise_affine=False)
+            self.k_norm = nn.RMSNorm(dim // num_heads, elementwise_affine=False)
+
+    def forward(self, x: torch.Tensor, memory: torch.Tensor) -> torch.Tensor:
+        B, T, H, W, D = x.shape
+        x_flat = einops.rearrange(x, "b t h w d -> b (t h w) d")
+        q = self.q_proj(x_flat)
+        k, v = self.kv_proj(memory).chunk(2, dim=-1)
+        q = einops.rearrange(q, "b n (head d) -> b head n d", head=self.num_heads)
+        k = einops.rearrange(k, "b n (head d) -> b head n d", head=self.num_heads)
+        v = einops.rearrange(v, "b n (head d) -> b head n d", head=self.num_heads)
+        if self.use_qknorm:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
+        x_flat = F.scaled_dot_product_attention(q, k, v)
+        x_flat = einops.rearrange(x_flat, "b head n d -> b n (head d)")
+        x_flat = self.out_proj(x_flat)
+        return einops.rearrange(x_flat, "b (t h w) d -> b t h w d", t=T, h=H, w=W)
+
+
+class TactileCrossBlock(nn.Module):
+    def __init__(self, dim: int, num_heads: int) -> None:
+        super().__init__()
+        self.norm_x = nn.RMSNorm(dim, elementwise_affine=False, eps=1e-6)
+        self.norm_memory = nn.RMSNorm(dim, elementwise_affine=False, eps=1e-6)
+        self.attn = CrossAttention(dim, num_heads, use_qknorm=True)
+
+    def forward(self, x: torch.Tensor, tactile_tokens: torch.Tensor) -> torch.Tensor:
+        return x + self.attn(self.norm_x(x), self.norm_memory(tactile_tokens))
+
+
 class Block(nn.Module):
     def __init__(
         self,
@@ -463,10 +505,19 @@ class Block(nn.Module):
                 else RotaryType.STANDARD
             ),
         )
+        self.tactile_cross_block = TactileCrossBlock(dim, num_heads)
 
-    def forward(self, x: torch.Tensor, c: torch.Tensor, num_views: int = 1) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        c: torch.Tensor,
+        num_views: int = 1,
+        tactile_tokens: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         x = self.s_block(x, c, num_views=num_views)
         x = self.t_block(x, c)
+        if tactile_tokens is not None:
+            x = self.tactile_cross_block(x, tactile_tokens)
         return x
 
 
@@ -510,7 +561,7 @@ class DiT(nn.Module):
             nn.Linear(dim, dim, bias=True),
         )
         self.action_embedder = nn.Linear(action_dim, dim)
-        self.tactile_embedder = nn.Linear(tactile_dim, dim) if tactile_dim > 0 else None
+        self.tactile_state_proj = nn.Linear(tactile_dim, dim) if tactile_dim > 0 else None
         self.blocks = nn.ModuleList(
             [Block(dim, num_heads, rope_config, temporal_mode=temporal_mode) for _ in range(num_layers)]
         )
@@ -568,6 +619,8 @@ class DiT(nn.Module):
             nn.init.constant_(block.s_block.adaLN_modulation[-1].bias, 0)
             nn.init.constant_(block.t_block.adaLN_modulation[-1].weight, 0)
             nn.init.constant_(block.t_block.adaLN_modulation[-1].bias, 0)
+            nn.init.constant_(block.tactile_cross_block.attn.out_proj.weight, 0)
+            nn.init.constant_(block.tactile_cross_block.attn.out_proj.bias, 0)
 
         # Zero-out output layers:
         if self.wide_head is False:
@@ -609,8 +662,7 @@ class DiT(nn.Module):
         self,
         t: torch.Tensor,
         action: torch.Tensor,
-        tactile: torch.Tensor | None = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         B, T = t.shape
         t = einops.rearrange(t, "b t -> (b t)")
         t_freq = self.timestep_embedding(t)
@@ -623,19 +675,39 @@ class DiT(nn.Module):
             null_action = self.get_null_cond(action)
             action = torch.where(should_drop, null_action, action)
 
-        tactile_cond = None
-        if self.tactile_embedder is not None:
-            if tactile is None:
-                raise ValueError("DiT was configured with tactile_dim > 0 but no tactile tensor was provided")
-            if self.training and self.tactile_dropout_prob > 0:
-                should_drop_tactile = (
-                    torch.rand((B, 1, 1), device=tactile.device)
-                    < self.tactile_dropout_prob
-                )
-                tactile = torch.where(should_drop_tactile, torch.zeros_like(tactile), tactile)
-            tactile_cond = self.tactile_embedder(tactile)
+        return time_cond, self.action_embedder(action)
 
-        return time_cond, self.action_embedder(action), tactile_cond
+    def get_tactile_tokens(
+        self,
+        tactile_state: torch.Tensor | None = None,
+    ) -> torch.Tensor | None:
+        if self.tactile_state_proj is None:
+            return None
+        if tactile_state is None:
+            raise ValueError(
+                "DiT was configured with tactile_dim > 0 but no tactile_state tensor was provided"
+            )
+        if tactile_state.ndim == 2:
+            tactile_state = tactile_state.unsqueeze(1)
+        elif tactile_state.ndim == 3:
+            if tactile_state.shape[1] != 1:
+                raise ValueError(
+                    "tactile_state must have shape (B, tactile_dim) or (B, 1, tactile_dim)"
+                )
+        else:
+            raise ValueError(
+                "tactile_state must have shape (B, tactile_dim) or (B, 1, tactile_dim)"
+            )
+
+        if self.training and self.tactile_dropout_prob > 0:
+            should_drop_tactile = (
+                torch.rand((tactile_state.shape[0], 1, 1), device=tactile_state.device)
+                < self.tactile_dropout_prob
+            )
+            tactile_state = torch.where(
+                should_drop_tactile, torch.zeros_like(tactile_state), tactile_state
+            )
+        return self.tactile_state_proj(tactile_state)
 
     def forward(
         self,
@@ -643,15 +715,17 @@ class DiT(nn.Module):
         t: torch.Tensor,
         action: torch.Tensor,
         tactile: torch.Tensor | None = None,
+        tactile_state: torch.Tensor | None = None,
     ) -> torch.Tensor:
         B, T, H, W, C = x.shape
         x = self.patchify(x)
-        time_cond, action_cond, tactile_cond = self.get_cond(t, action, tactile)
+        time_cond, action_cond = self.get_cond(t, action)
         c = time_cond + action_cond
-        if tactile_cond is not None:
-            c = c + tactile_cond
+        if tactile_state is None and tactile is not None:
+            tactile_state = tactile
+        tactile_tokens = self.get_tactile_tokens(tactile_state)
         for block in self.blocks:
-            x = block(x, c, num_views=self.num_views)
+            x = block(x, c, num_views=self.num_views, tactile_tokens=tactile_tokens)
 
         if self.wide_head is True:            
             # Combine encoder features with timestep only

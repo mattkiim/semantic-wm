@@ -86,17 +86,18 @@ CUDA_VISIBLE_DEVICES=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python -
   --encoder_type precomputed \
   --adapter_type svae \
   --adapter_latent_dim 96 \
-  --adapter_checkpoint_path outputs/adapter_dinov3_precomputed_pixel/adapter_ckpt_000000057344.pt \
+  --adapter_checkpoint_path outputs/adapter_dinov3_precomputed_pixel_bs4_ga4/adapter_ckpt_000000117936.pt \
   --action_dim 7 \
   --batch_size 16 \
-  --gradient_accumulation_steps 1 \
+  --gradient_accumulation_steps 2 \
   --dit_size S \
   --objective flow_matching \
   --wandb_mode online \
   --wandb_entity mattkiim-learning \
   --wandb_project_name semantic-wm \
-  --num_epochs 400 \
-  --log_every_samples 1000 \
+  --warmup_epochs 100 \
+  --num_epochs 4000 \
+  --log_every_samples 10000 \
   --validate_every_samples 1000 \
   --use_pixel_decoder_for_val True \
   --save_model True \
@@ -117,24 +118,27 @@ CUDA_VISIBLE_DEVICES=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python -
   --h5_tactile_key cam_tactile_cls_embd \
   --tactile_dropout_prob 0.2 \
   --batch_size 16 \
-  --gradient_accumulation_steps 1 \
+  --gradient_accumulation_steps 2 \
   --dit_size S \
   --objective flow_matching \
   --wandb_mode online \
   --wandb_entity mattkiim-learning \
   --wandb_project_name semantic-wm \
-  --num_epochs 400 \
+  --warmup_epochs 100 \
+  --num_epochs 4000 \
   --log_every_samples 1000 \
-  --validate_every_samples 1000 \
+  --validate_every_samples 10000 \
   --use_pixel_decoder_for_val True \
   --save_model True \
-  --checkpoint_dir outputs/dit_dinov3_precomputed_tactile_v1_do_0.2_cls_new_adapter
+  --checkpoint_dir outputs/dit_dinov3_precomputed_tactile_v1_do_0.2_cls_new_adapter_long
 
 
 # -- eval -- #
+
+# tactile
 CUDA_VISIBLE_DEVICES=0 python -m src.eval_spill \
-  --checkpoint_path outputs/dit_dinov3_precomputed_tactile_v1_do_0.2_cls/ckpt_samples_000000235872.pt \
-  --adapter_checkpoint_path outputs/adapter_dinov3_precomputed_pixel/adapter_ckpt_000000057344.pt \
+  --checkpoint_path outputs/dit_dinov3_precomputed_tactile_v1_do_0.2_cls_new_adapter_long/ckpt_samples_000000771232.pt \
+  --adapter_checkpoint_path outputs/adapter_dinov3_precomputed_pixel_bs4_ga4/adapter_ckpt_000000117936.pt \
   --h5_val_path /extra_storage/mkim/data/consolidated_val_backbone_labeled_new.h5 \
   --encoder_type precomputed \
   --adapter_type svae \
@@ -145,3 +149,15 @@ CUDA_VISIBLE_DEVICES=0 python -m src.eval_spill \
   --h5_tactile_key cam_tactile_cls_embd \
   --use_pixel_decoder_for_val True \
   --output_dir eval_outputs/spill_tactile_v1
+
+# rgb
+CUDA_VISIBLE_DEVICES=0 python -m src.eval_spill \
+  --checkpoint_path outputs/dit_dinov3_precomputed_rgb_v2_long/ckpt_samples_000000841344.pt \
+  --adapter_checkpoint_path outputs/adapter_dinov3_precomputed_pixel_bs4_ga4/adapter_ckpt_000000117936.pt \
+  --h5_val_path /extra_storage/mkim/data/consolidated_val_backbone_labeled_new.h5 \
+  --encoder_type precomputed \
+  --adapter_type svae \
+  --adapter_latent_dim 96 \
+  --action_dim 7 \
+  --use_pixel_decoder_for_val True \
+  --output_dir eval_outputs/spill_rgb_v2

@@ -63,7 +63,7 @@ class H5EmbeddingDataset(Dataset):
         split: ``"train"`` or ``"test"``/``"val"``.
     """
 
-    def __init__(self, args, split: str = "train", spill_only: bool = False) -> None:
+    def __init__(self, args, split: str = "train", spill_only: bool = False, spill_windows_per_transition: int = 3) -> None:
         super().__init__()
 
         if split == "train":
@@ -119,27 +119,37 @@ class H5EmbeddingDataset(Dataset):
             self.traj_keys = valid_keys
             self.traj_lengths = valid_lengths
 
-            # Pre-index all windows that contain at least one label=1 (spill) frame.
+            # Pre-index windows around each 0→1 label transition.
             # Each entry is (traj_key, step_indices_list) for deterministic __getitem__.
             if spill_only:
                 self._spill_windows = []
                 skip = self.frame_skip
                 n_history = self.num_history
                 n_future = self.n_frames - n_history
+                half = spill_windows_per_transition // 2
                 for k, length in zip(valid_keys, valid_lengths):
                     if "labels" not in f[k]:
                         continue
                     labels = np.array(f[k]["labels"])
                     history_span = n_history * skip
                     future_span = (n_future - 1) * skip + 1
-                    for current_step in range(history_span, length - future_span + 1):
-                        indices = []
-                        for i in range(n_history, 0, -1):
-                            indices.append(max(0, current_step - i * skip))
-                        indices.append(current_step)
-                        for i in range(1, n_future):
-                            indices.append(min(current_step + i * skip, length - 1))
-                        if np.any(labels[indices] == 1):
+                    min_step = history_span
+                    max_step = length - future_span
+                    transitions = [
+                        t for t in range(1, len(labels))
+                        if labels[t - 1] == 0 and labels[t] == 1
+                    ]
+                    for t in transitions:
+                        for offset in range(-half, spill_windows_per_transition - half):
+                            current_step = t + offset * skip
+                            if not (min_step <= current_step <= max_step):
+                                continue
+                            indices = []
+                            for i in range(n_history, 0, -1):
+                                indices.append(max(0, current_step - i * skip))
+                            indices.append(current_step)
+                            for i in range(1, n_future):
+                                indices.append(min(current_step + i * skip, length - 1))
                             self._spill_windows.append((k, indices))
 
     def __len__(self) -> int:

@@ -90,7 +90,10 @@ def evaluate_spill(args):
 
     # ── Dataset (spill windows only) ──────────────────────────────────────
     logger.info("Indexing spill windows in val set...")
-    spill_dataset = H5EmbeddingDataset(args, split="test", spill_only=True)
+    spill_dataset = H5EmbeddingDataset(
+        args, split="test", spill_only=True,
+        spill_windows_per_transition=args.spill_windows_per_transition,
+    )
     logger.info("Spill windows found: %d", len(spill_dataset))
     if len(spill_dataset) == 0:
         logger.error("No spill windows found — check that labels key exists and label=1 is present.")
@@ -174,8 +177,8 @@ def evaluate_spill(args):
         device=device,
     ).to(device)
 
-    n_ctx = max(args.num_history // temporal_ds, 1)
-    effective_skip = args.num_history // temporal_ds
+    n_ctx = (args.num_history + 1) // max(temporal_ds, 1)
+    effective_skip = n_ctx
 
     # ── Evaluation loop ───────────────────────────────────────────────────
     all_psnr, all_ssim, all_mse = [], [], []
@@ -332,6 +335,9 @@ def get_configs():
     parser.add_argument("--window_len", type=int, default=None)
     parser.add_argument("--horizon", type=int, default=1)
     parser.add_argument("--precision", type=str, default="bfloat16")
+
+    # ── Spill indexing ───────────────────────────────────────────────────
+    parser.add_argument("--spill_windows_per_transition", type=int, default=3)
 
     # ── Output ───────────────────────────────────────────────────────────
     parser.add_argument("--output_dir", type=str, default="eval_outputs/spill")

@@ -145,6 +145,7 @@ tmp*
 # Hydra outputs
 outputs/
 eval_outputs/
+outputs_old/
 .hydra
 
 /slurm_logs/

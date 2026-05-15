@@ -3,18 +3,41 @@
 Loads a DiT checkpoint and runs validation only on windows that contain at
 least one label=1 (spill) frame, reporting PSNR / SSIM / MSE-latent.
 
-Usage::
+Usage:
 
-    python -m src.eval_spill \
-        --checkpoint_path outputs/dit_dinov3_precomputed_tactile_v1/ckpt_samples_000100000.pt \
-        --adapter_checkpoint_path outputs/adapter_dinov3_precomputed_pixel/adapter_ckpt_000000057344.pt \
-        --h5_val_path /extra_storage/mkim/data/consolidated_val_backbone_labeled_new.h5 \
-        --encoder_type precomputed \
-        --adapter_type svae \
-        --adapter_latent_dim 96 \
-        --action_dim 7 \
-        --use_pixel_decoder_for_val True \
-        --output_dir eval_outputs/spill_tactile_v1
+# -- Tactile -- #
+
+CUDA_VISIBLE_DEVICES=0 python -m src.eval_spill \
+  --checkpoint_path outputs/dit_dinov3_precomputed_tactile_v1_do_0.2_cls/ckpt_samples_000000235872.pt \
+  --adapter_checkpoint_path outputs/adapter_dinov3_precomputed_pixel/adapter_ckpt_000000057344.pt \
+  --h5_val_path /extra_storage/mkim/data/consolidated_val_backbone_labeled_new.h5 \
+  --encoder_type precomputed \
+  --adapter_type svae \
+  --adapter_latent_dim 96 \
+  --action_dim 7 \
+  --use_tactile True \
+  --tactile_dim 512 \
+  --h5_tactile_key cam_tactile_cls_embd \
+  --num_samples 5 \
+  --num_videos 10 \
+  --output_dir eval_outputs/spill_tactile_v1
+  
+  
+# -- RGB -- #
+
+CUDA_VISIBLE_DEVICES=0 python -m src.eval_spill \
+  --checkpoint_path outputs/dit_dinov3_precomputed_rgb_v2/ckpt_samples_000000235872.pt \
+  --adapter_checkpoint_path outputs/adapter_dinov3_precomputed_pixel/adapter_ckpt_000000057344.pt \
+  --h5_val_path /extra_storage/mkim/data/consolidated_val_backbone_labeled_new.h5 \
+  --encoder_type precomputed \
+  --adapter_type svae \
+  --adapter_latent_dim 96 \
+  --action_dim 7 \
+  --num_samples 5 \
+  --num_videos 10 \
+  --output_dir eval_outputs/spill_rgb_v2
+
+
 """
 
 from __future__ import annotations
@@ -90,7 +113,10 @@ def evaluate_spill(args):
 
     # ── Dataset (spill windows only) ──────────────────────────────────────
     logger.info("Indexing spill windows in val set...")
-    spill_dataset = H5EmbeddingDataset(args, split="test", spill_only=True)
+    spill_dataset = H5EmbeddingDataset(
+        args, split="test", spill_only=True,
+        spill_windows_per_transition=args.spill_windows_per_transition,
+    )
     logger.info("Spill windows found: %d", len(spill_dataset))
     if len(spill_dataset) == 0:
         logger.error("No spill windows found — check that labels key exists and label=1 is present.")
@@ -176,11 +202,19 @@ def evaluate_spill(args):
 
     n_ctx = max(args.num_history // temporal_ds, 1)
     effective_skip = args.num_history // temporal_ds
+    num_samples = args.num_samples
+    num_videos = args.num_videos
+    videos_dir = output_dir / "videos"
+    if num_videos > 0:
+        videos_dir.mkdir(exist_ok=True)
 
     # ── Evaluation loop ───────────────────────────────────────────────────
     all_psnr, all_ssim, all_mse = [], [], []
+    # uncertainty: per-window mean pixel variance across K samples, shape (T,) per window
+    all_uncertainty_per_step = []
+    videos_saved = 0
 
-    logger.info("Running spill evaluation (%d windows)...", len(spill_dataset))
+    logger.info("Running spill evaluation (%d windows, %d samples each)...", len(spill_dataset), num_samples)
     with torch.no_grad():
         for batch in spill_loader:
             val_x, val_actions, val_tactile = _unpack_batch(batch)
@@ -203,31 +237,55 @@ def evaluate_spill(args):
                     if val_tactile is not None:
                         val_tactile = downsample_sequence_temporal(val_tactile, temporal_ds)
 
-                samples_latent = diffusion.generate(
+                # Repeat inputs K times along batch dim — single generate() call,
+                # GPU parallelizes across all K samples simultaneously.
+                B = val_latent_adapted.shape[0]
+                lat_rep = val_latent_adapted.repeat_interleave(num_samples, dim=0)   # (B*K, ...)
+                act_rep = val_actions.repeat_interleave(num_samples, dim=0)
+                tac_rep = val_tactile.repeat_interleave(num_samples, dim=0) if val_tactile is not None else None
+
+                samples_latent_flat = diffusion.generate(
                     ema,
-                    val_latent_adapted,
-                    val_actions,
+                    lat_rep,
+                    act_rep,
                     n_context_frames=n_ctx,
-                    n_frames=val_latent_adapted.shape[1],
+                    n_frames=lat_rep.shape[1],
                     window_len=args.window_len,
                     horizon=args.horizon,
                     cfg=args.cfg,
-                    tactile=val_tactile,
-                )
+                    tactile=tac_rep,
+                )  # (B*K, T, H, W, C)
 
+                # repeat_interleave gives [b0]*K,[b1]*K,... so reshape (B,K,...) then permute to (K,B,...)
+                all_latents_flat = samples_latent_flat.reshape(B, num_samples, *samples_latent_flat.shape[1:])
+                all_latents_flat = all_latents_flat.permute(1, 0, *range(2, all_latents_flat.dim()))
+
+                samples_latent = all_latents_flat[0]  # first sample, (B, T, H, W, C)
                 mse = F.mse_loss(samples_latent, val_latent_adapted).item()
                 all_mse.append(mse)
 
+                def _reshape_decoded(t):
+                    # t: (B*K, T, H, W, C) → (K, B, T, H, W, C)
+                    extra = t.shape[1:]
+                    return t.reshape(B, num_samples, *extra).permute(1, 0, *range(2, 2 + len(extra)))
+
                 if use_pixel_dec:
-                    samples = pixel_decoder(samples_latent)
-                    gt_pixels = pixel_decoder(val_latent_adapted)
-                    gt_np = gt_pixels.float().clamp(0, 1).cpu().numpy()
+                    all_decoded = _reshape_decoded(pixel_decoder(samples_latent_flat))
+                    samples = all_decoded[0]
+                    gt_np = pixel_decoder(val_latent_adapted).float().clamp(0, 1).cpu().numpy()
                 elif has_encoder_decoder:
-                    decoded = adapter.decode(samples_latent) if not is_identity else samples_latent
-                    samples = autoencoder.decode(decoded)
+                    dec_input = adapter.decode(samples_latent_flat) if not is_identity else samples_latent_flat
+                    all_decoded = _reshape_decoded(autoencoder.decode(dec_input))
+                    samples = all_decoded[0]
                     gt_np = val_x.float().clamp(0, 1).cpu().numpy()
                 else:
                     continue
+
+                # Per-step uncertainty: variance across K samples, averaged over B, H, W, C
+                # all_decoded: (K, B, T, H, W, C) → var over K → (B, T, H, W, C) → mean over B,H,W,C → (T,)
+                pixel_var = all_decoded.float().var(dim=0)  # (B, T, H, W, C)
+                uncertainty_per_step = pixel_var.mean(dim=(0, 2, 3, 4)).cpu().numpy()  # (T,)
+                all_uncertainty_per_step.append(uncertainty_per_step[effective_skip:])
 
                 samples_np = samples.float().clamp(0, 1).cpu().numpy()
                 if samples_np.shape[1] < gt_np.shape[1]:
@@ -238,29 +296,80 @@ def evaluate_spill(args):
                 all_psnr.append(metrics["psnr"])
                 all_ssim.append(metrics["ssim"])
 
+                # Save side-by-side videos: GT | sample_1 | sample_2 | ...
+                if videos_saved < num_videos:
+                    import imageio
+                    # all_decoded: (K, B, T, H, W, C) — take first item in batch
+                    gen_strips = [all_decoded[k][0].float().clamp(0, 1).cpu().numpy()
+                                  for k in range(num_samples)]  # K x (T, H, W, C)
+                    gt_strip = gt_np[0]  # (T, H, W, C)
+                    # Stack horizontally: GT | gen_0 | gen_1 | ...
+                    row = np.concatenate([gt_strip] + gen_strips, axis=2)  # (T, H, W*(K+1), C)
+                    row_uint8 = (row * 255).astype(np.uint8)
+                    vid_path = videos_dir / f"spill_{videos_saved:04d}.mp4"
+                    imageio.mimsave(str(vid_path), row_uint8, fps=2)
+                    videos_saved += 1
+
+    uncertainty_per_step = np.mean(all_uncertainty_per_step, axis=0).tolist() if all_uncertainty_per_step else []
+    mean_uncertainty = float(np.mean(uncertainty_per_step)) if uncertainty_per_step else 0.0
+
     results = {
         "checkpoint": str(args.checkpoint_path),
         "samples_seen": samples_seen,
         "spill_windows": len(spill_dataset),
+        "num_samples": num_samples,
         "psnr": float(np.mean(all_psnr)),
         "ssim": float(np.mean(all_ssim)),
         "mse_latent": float(np.mean(all_mse)),
         "psnr_std": float(np.std(all_psnr)),
         "ssim_std": float(np.std(all_ssim)),
+        "uncertainty_mean": mean_uncertainty,
+        "uncertainty_per_step": uncertainty_per_step,
     }
 
     print("\n=== Spill Evaluation Results ===")
-    print(f"  Spill windows : {results['spill_windows']}")
-    print(f"  MSE (latent)  : {results['mse_latent']:.6f}")
-    print(f"  PSNR          : {results['psnr']:.2f} ± {results['psnr_std']:.2f}")
-    print(f"  SSIM          : {results['ssim']:.4f} ± {results['ssim_std']:.4f}")
+    print(f"  Spill windows   : {results['spill_windows']}")
+    print(f"  Samples per win : {num_samples}")
+    print(f"  MSE (latent)    : {results['mse_latent']:.6f}")
+    print(f"  PSNR            : {results['psnr']:.2f} ± {results['psnr_std']:.2f}")
+    print(f"  SSIM            : {results['ssim']:.4f} ± {results['ssim_std']:.4f}")
+    print(f"  Uncertainty     : {mean_uncertainty:.6f}  (pixel var across {num_samples} samples)")
+    if uncertainty_per_step:
+        steps_str = "  ".join(f"t{i+1}:{v:.5f}" for i, v in enumerate(uncertainty_per_step))
+        print(f"  Per-step var    : {steps_str}")
+    if num_videos > 0:
+        print(f"  Videos saved    : {videos_saved} → {videos_dir}/")
 
     out_path = output_dir / "spill_metrics.json"
     with open(out_path, "w") as f:
         json.dump(results, f, indent=2)
     logger.info("Saved to %s", out_path)
 
+    if uncertainty_per_step:
+        _plot_uncertainty(uncertainty_per_step, output_dir, args.checkpoint_path)
+
     return results
+
+
+def _plot_uncertainty(uncertainty_per_step, output_dir: Path, checkpoint_path: str):
+    import matplotlib.pyplot as plt
+
+    steps = list(range(1, len(uncertainty_per_step) + 1))
+    label = Path(checkpoint_path).parts[-2]  # e.g. "dit_dinov3_precomputed_tactile_v1"
+
+    fig, ax = plt.subplots(figsize=(7, 4))
+    ax.plot(steps, uncertainty_per_step, "o-", markersize=5, label=label)
+    ax.set_xlabel("Prediction step")
+    ax.set_ylabel("Mean pixel variance across samples")
+    ax.set_title("Prediction uncertainty vs. horizon (spill windows)")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+
+    plot_path = output_dir / "uncertainty_per_step.png"
+    plt.savefig(plot_path, dpi=150)
+    plt.close(fig)
+    logger.info("Uncertainty plot saved to %s", plot_path)
 
 
 def get_configs():
@@ -320,10 +429,16 @@ def get_configs():
     parser.add_argument("--input_w", type=int, default=224)
     parser.add_argument("--variable_history_sampling",
                         type=lambda x: x.lower() == "true", default=False)
-    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--num_workers", type=int, default=4)
 
     # ── Generation ───────────────────────────────────────────────────────
+    parser.add_argument("--spill_windows_per_transition", type=int, default=3,
+                        help="Windows to sample around each 0→1 label transition")
+    parser.add_argument("--num_samples", type=int, default=5,
+                        help="Number of stochastic samples per window for uncertainty estimation")
+    parser.add_argument("--num_videos", type=int, default=10,
+                        help="Number of side-by-side videos to save (0 to disable)")
     parser.add_argument("--objective", type=str, default="flow_matching",
                         choices=["ddpm", "flow_matching"])
     parser.add_argument("--timesteps", type=int, default=1000)

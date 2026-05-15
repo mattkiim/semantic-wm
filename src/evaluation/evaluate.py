@@ -26,6 +26,7 @@ from ..training.diffusion import Diffusion, FlowMatching
 from ..training.utils import (
     downsample_actions_temporal,
     downsample_sequence_temporal,
+    mask_future_conditioning,
     resolve_adapter_ckpt,
     setup_pixel_decoder_for_val,
     load_frozen_adapter_weights,
@@ -266,7 +267,21 @@ def evaluate_model(args) -> Dict:
     )
 
     num_eval_samples = getattr(args, "num_eval_samples", 2048)
-    n_ctx = max(args.num_history, 1)
+    context_frames = args.num_history + 1
+    if args.n_frames <= context_frames:
+        raise ValueError(
+            f"n_frames={args.n_frames} must be greater than "
+            f"num_history + 1={context_frames} to evaluate future predictions"
+        )
+    if context_frames % temporal_ds != 0:
+        raise ValueError(
+            f"num_history + 1={context_frames} must be divisible by "
+            f"temporal_downsample_factor={temporal_ds}"
+        )
+    n_ctx = context_frames // temporal_ds
+    import ipdb; ipdb.set_trace()
+    print(n_ctx)
+    print(max(args.num_history, 1))
     cfg = getattr(args, "cfg", 1.0)
 
     # ── Generation loop (pixel metrics) ─────────────────────────────────
@@ -319,6 +334,7 @@ def evaluate_model(args) -> Dict:
                     actions = downsample_actions_temporal(actions, temporal_ds)
                     if tactile is not None:
                         tactile = downsample_sequence_temporal(tactile, temporal_ds)
+                tactile = mask_future_conditioning(tactile, n_ctx)
 
                 # Generate
                 samples_latent = diffusion.generate(
@@ -344,7 +360,7 @@ def evaluate_model(args) -> Dict:
             if "recon" in metrics_to_compute and not recon_computed:
                 recon_metrics = _compute_reconstruction_ceiling(
                     autoencoder, adapter, pixel_decoder, use_pixel_decoder, is_identity,
-                    gt_pixels, x, device, precision, skip_frames=args.num_history,
+                    gt_pixels, x, device, precision, skip_frames=context_frames,
                 )
                 recon_computed = True
                 logger.info(
@@ -353,7 +369,7 @@ def evaluate_model(args) -> Dict:
                 )
 
             # Per-frame metrics (compare gen vs raw GT pixels)
-            skip = args.num_history
+            skip = context_frames
             if "psnr" in metrics_to_compute or "ssim" in metrics_to_compute:
                 ps = compute_psnr_ssim(gen_pixels, gt_pixels, skip_frames=skip)
                 all_psnr_per_step.append(ps["psnr"])
@@ -393,7 +409,7 @@ def evaluate_model(args) -> Dict:
     results: Dict = {"model_preset": getattr(args, "model_preset", "custom")}
 
     # Per-step metrics (average across batches per step)
-    T_eval = args.n_frames - args.num_history
+    T_eval = args.n_frames - context_frames
     if all_psnr_per_step:
         psnr_arr = np.array(all_psnr_per_step)  # (num_batches, T_eval)
         ssim_arr = np.array(all_ssim_per_step)

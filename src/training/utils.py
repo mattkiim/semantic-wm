@@ -422,3 +422,15 @@ def downsample_sequence_temporal(sequence: torch.Tensor, factor: int) -> torch.T
         f"Temporal dim T={T} is not divisible by downsample factor={factor}"
     )
     return sequence.reshape(B, T // factor, factor * D)
+
+
+def mask_future_conditioning(
+    sequence: torch.Tensor | None,
+    context_frames: int,
+) -> torch.Tensor | None:
+    """Zero conditioning values after the clean context window."""
+    if sequence is None:
+        return None
+    sequence = sequence.clone()
+    sequence[:, context_frames:] = 0
+    return sequence

@@ -358,7 +358,18 @@ class H5TrajectoryDataset(Dataset):
         idx_arr = np.array(step_indices)
         unique_sorted, inverse = np.unique(idx_arr, return_inverse=True)
         frames = traj[self.camera_key][unique_sorted.tolist()][inverse]
-        actions = traj["actions"][unique_sorted.tolist()][inverse]
+
+        # Observations are indexed by step_indices, but action a_t leads to
+        # obs_{t+1}. Shift action conditioning back one step so each observed
+        # target frame receives the transition action that produced it.
+        action_idx_arr = np.array([max(si - 1, 0) for si in step_indices])
+        import ipdb; ipdb.set_trace()
+        print(idx_arr)
+        print(action_idx_arr)
+        action_unique_sorted, action_inverse = np.unique(
+            action_idx_arr, return_inverse=True
+        )
+        actions = traj["actions"][action_unique_sorted.tolist()][action_inverse]
         tactile = (
             traj[self.tactile_key][unique_sorted.tolist()][inverse]
             if self.use_tactile

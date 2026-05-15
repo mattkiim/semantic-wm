@@ -166,3 +166,5 @@ validation_videos/*
 *.tmp.md
 
 data
+
+tests/

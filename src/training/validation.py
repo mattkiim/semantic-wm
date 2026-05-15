@@ -8,7 +8,11 @@ from pathlib import Path
 from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 
 from ..models.adapters import IdentityAdapter
-from .utils import downsample_actions_temporal, downsample_sequence_temporal
+from .utils import (
+    downsample_actions_temporal,
+    downsample_sequence_temporal,
+    mask_future_conditioning,
+)
 
 
 def validate_step(
@@ -94,12 +98,19 @@ def validate_step(
 
             # Handle temporal downsampling (e.g. Qwen video, V-JEPA 2.1)
             temporal_ds = getattr(autoencoder, "temporal_downsample_factor", 1)
+            context_frames = args.num_history + 1
+            if context_frames % temporal_ds != 0:
+                raise ValueError(
+                    f"num_history + 1={context_frames} must be divisible by "
+                    f"temporal_downsample_factor={temporal_ds}"
+                )
             if temporal_ds > 1:
                 val_actions = downsample_actions_temporal(val_actions, temporal_ds)
                 if val_tactile is not None:
                     val_tactile = downsample_sequence_temporal(val_tactile, temporal_ds)
-            n_ctx = max(args.num_history // temporal_ds, 1)
-            effective_skip = args.num_history // temporal_ds
+            n_ctx = context_frames // temporal_ds
+            effective_skip = n_ctx
+            val_tactile = mask_future_conditioning(val_tactile, n_ctx)
 
             samples_latent = diffusion.generate(
                 ema,
@@ -212,7 +223,7 @@ def validate_step(
     # The first num_history frames are zero-noised copies of the input, so comparing
     # them against GT mostly measures autoencoder fidelity, not the world model.
     pixel_dec_temporal_up = use_pixel_dec and getattr(pixel_decoder, "temporal_upsample", False)
-    skip = args.num_history if pixel_dec_temporal_up else effective_skip
+    skip = (args.num_history + 1) if pixel_dec_temporal_up else effective_skip
     metrics = calculate_image_metrics(
         samples_np, gt_np, skip_frames=skip
     )
@@ -263,8 +274,14 @@ def validate_spill(
     all_psnr, all_ssim, all_mse = [], [], []
 
     temporal_ds = getattr(autoencoder, "temporal_downsample_factor", 1)
-    n_ctx = max(args.num_history // temporal_ds, 1)
-    effective_skip = args.num_history // temporal_ds
+    context_frames = args.num_history + 1
+    if context_frames % temporal_ds != 0:
+        raise ValueError(
+            f"num_history + 1={context_frames} must be divisible by "
+            f"temporal_downsample_factor={temporal_ds}"
+        )
+    n_ctx = context_frames // temporal_ds
+    effective_skip = n_ctx
     is_identity = isinstance(adapter, IdentityAdapter)
     has_encoder_decoder = getattr(autoencoder, "has_decoder", True)
     use_pixel_dec = (
@@ -294,6 +311,7 @@ def validate_spill(
                     val_actions = downsample_actions_temporal(val_actions, temporal_ds)
                     if val_tactile is not None:
                         val_tactile = downsample_sequence_temporal(val_tactile, temporal_ds)
+                val_tactile = mask_future_conditioning(val_tactile, n_ctx)
 
                 samples_latent = diffusion.generate(
                     ema, val_latent_adapted, val_actions,

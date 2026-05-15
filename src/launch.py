@@ -5,6 +5,7 @@ import os
 import datetime
 import wandb
 import sys
+import tempfile
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.training import train_wm
@@ -212,8 +213,31 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
 
     if args.compile_cache_dir is not None and args.compile_models:
-        cache_dir = os.path.abspath(args.compile_cache_dir)
-        os.makedirs(cache_dir, exist_ok=True)
+        requested_cache_dir = Path(args.compile_cache_dir).expanduser().resolve()
+        fallback_cache_dir = Path(tempfile.gettempdir()) / f"semantic-wm-inductor-{os.getuid()}"
+        cache_dir_path = (
+            fallback_cache_dir
+            if requested_cache_dir == Path(tempfile.gettempdir()).resolve()
+            else requested_cache_dir
+        )
+        try:
+            cache_dir_path.mkdir(parents=True, exist_ok=True)
+            for probe_dir in (cache_dir_path, cache_dir_path / "cache"):
+                probe_dir.mkdir(parents=True, exist_ok=True)
+                probe_path = probe_dir / ".write_test"
+                probe_path.write_text("ok")
+                probe_path.unlink()
+        except OSError as exc:
+            fallback_cache_dir.mkdir(parents=True, exist_ok=True)
+            logging.warning(
+                "Compile cache dir %s is not writable (%s); using %s",
+                requested_cache_dir,
+                exc,
+                fallback_cache_dir,
+            )
+            cache_dir_path = fallback_cache_dir
+
+        cache_dir = str(cache_dir_path)
         # PyTorch uses TORCHINDUCTOR_CACHE_DIR or torch._inductor.config.cache_dir
         os.environ["TORCHINDUCTOR_CACHE_DIR"] = cache_dir
         # Also set FX graph cache for cross-run reuse of compiled graphs

@@ -36,6 +36,7 @@ from .utils import (
     setup_pixel_decoder_for_val,
     downsample_actions_temporal,
     downsample_sequence_temporal,
+    mask_future_conditioning,
 )
 
 # Head architecture constants (kept here rather than as magic numbers inline)
@@ -121,27 +122,33 @@ def train_wm(args) -> None:
     # Temporal downsampling (e.g. Qwen video mode, V-JEPA 2.1)
     # Read before compile to avoid OptimizedModule attribute delegation issues.
     temporal_ds = autoencoder.temporal_downsample_factor
+    context_frames = args.num_history + 1
+    if args.n_frames <= context_frames:
+        raise ValueError(
+            f"n_frames={args.n_frames} must be greater than "
+            f"num_history + 1={context_frames} to predict future frames"
+        )
     autoencoder = maybe_compile(autoencoder, "autoencoder", args.compile_models)
     if temporal_ds > 1:
         assert args.n_frames % temporal_ds == 0, (
             f"n_frames={args.n_frames} must be divisible by "
             f"temporal_downsample_factor={temporal_ds}"
         )
-        assert args.num_history % temporal_ds == 0, (
-            f"num_history={args.num_history} must be divisible by "
+        assert context_frames % temporal_ds == 0, (
+            f"num_history + 1={context_frames} must be divisible by "
             f"temporal_downsample_factor={temporal_ds}"
         )
         logging.info(
             "Temporal downsampling active: factor=%d, effective_action_dim=%d, "
-            "effective_num_history=%d",
-            temporal_ds, args.action_dim * temporal_ds, args.num_history // temporal_ds,
+            "effective_context_frames=%d",
+            temporal_ds, args.action_dim * temporal_ds, context_frames // temporal_ds,
         )
     if getattr(args, "use_tactile", False) and getattr(args, "tactile_dim", 0) <= 0:
         raise ValueError("--tactile_dim must be > 0 when --use_tactile True")
 
     effective_action_dim = args.action_dim * temporal_ds
     effective_tactile_dim = getattr(args, "tactile_dim", 0) * temporal_ds
-    effective_num_history = args.num_history // temporal_ds
+    effective_context_frames = context_frames // temporal_ds
 
     adapter_cfg, adapter_ckpt_data = resolve_adapter_ckpt(args, device)
     adapter = create_adapter(adapter_cfg, input_dim=autoencoder.latent_dim).to(device)
@@ -312,11 +319,12 @@ def train_wm(args) -> None:
                     actions = downsample_actions_temporal(actions, temporal_ds)
                     if tactile is not None:
                         tactile = downsample_sequence_temporal(tactile, temporal_ds)
+                tactile = mask_future_conditioning(tactile, effective_context_frames)
                 loss = diffusion.loss_fn(
                     model,
                     x,
                     actions,
-                    num_history=effective_num_history,
+                    num_history=effective_context_frames,
                     tactile=tactile,
                 )
 

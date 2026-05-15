@@ -147,7 +147,9 @@ def train_adapter(args) -> None:
     train_iter = iter(train_loader)
 
     samples_per_epoch = len(train_dataset)
-    steps_per_epoch = max(samples_per_epoch // (args.batch_size * world_size), 1)
+    grad_accum_steps = max(int(getattr(args, "gradient_accumulation_steps", 1)), 1)
+    micro_steps_per_epoch = max(samples_per_epoch // (args.batch_size * world_size), 1)
+    steps_per_epoch = max(micro_steps_per_epoch // grad_accum_steps, 1)
     max_train_steps = args.num_epochs * steps_per_epoch
 
     # ── Models ────────────────────────────────────────────────────────────────
@@ -258,7 +260,7 @@ def train_adapter(args) -> None:
     train_steps, total_samples_seen = load_adapter_training_checkpoint(
         checkpoint_dir, adapter_no_ddp, pixel_decoder_no_ddp, optimizer, lr_scheduler, device
     )
-    current_epoch = train_steps // steps_per_epoch
+    current_epoch = (train_steps * grad_accum_steps) // micro_steps_per_epoch
 
     # ── Loss hyper-parameters ─────────────────────────────────────────────────
     kl_weight_target = getattr(args, "kl_weight", 1e-6)
@@ -291,149 +293,154 @@ def train_adapter(args) -> None:
     if pbar and train_steps > 0:
         pbar.n = train_steps
         pbar.refresh()
+    optimizer.zero_grad(set_to_none=True)
+    if disc_optimizer is not None:
+        disc_optimizer.zero_grad(set_to_none=True)
 
     # ── Training loop ─────────────────────────────────────────────────────────
     while train_steps < max_train_steps:
-        try:
-            batch = next(train_iter)
-        except StopIteration:
-            current_epoch += 1
-            if train_sampler is not None:
-                train_sampler.set_epoch(current_epoch)
-            train_iter = iter(train_loader)
-            batch = next(train_iter)
+        for _ in range(grad_accum_steps):
+            try:
+                batch = next(train_iter)
+            except StopIteration:
+                current_epoch += 1
+                if train_sampler is not None:
+                    train_sampler.set_epoch(current_epoch)
+                train_iter = iter(train_loader)
+                batch = next(train_iter)
 
-        x, pixel_target = _unpack_adapter_batch(batch)
-        x = x.to(device)
-        if pixel_target is not None:
-            pixel_target = pixel_target.to(device)
+            x, pixel_target = _unpack_adapter_batch(batch)
+            x = x.to(device)
+            if pixel_target is not None:
+                pixel_target = pixel_target.to(device)
 
-        # ── KL warmup schedule ────────────────────────────────────────────
-        kl_warmup_steps = int(kl_warmup_fraction * max_train_steps) if kl_warmup_fraction > 0 else 0
-        if kl_warmup_steps > 0:
-            kl_weight = min(kl_weight_target, kl_weight_target * (train_steps / kl_warmup_steps))
-        else:
-            kl_weight = kl_weight_target
-
-        # ── Forward (autocast for encoder + adapter + pixel MSE) ──────────
-        with torch.autocast(device_type="cuda", dtype=precision):
-            with torch.no_grad():
-                f_h = autoencoder.encode(x)
-
-            enc_out = adapter_no_ddp.encode(f_h)
-            if isinstance(enc_out, tuple):
-                z_l, mu, logvar = enc_out
+            # ── KL warmup schedule ────────────────────────────────────────────
+            kl_warmup_steps = int(kl_warmup_fraction * max_train_steps) if kl_warmup_fraction > 0 else 0
+            if kl_warmup_steps > 0:
+                kl_weight = min(kl_weight_target, kl_weight_target * (train_steps / kl_warmup_steps))
             else:
-                z_l, mu, logvar = enc_out, None, None
+                kl_weight = kl_weight_target
 
-            f_h_rec = adapter_no_ddp.decode(z_l)
-            loss_rec, loss_mse, loss_cos = semantic_reconstruction_loss(
-                f_h, f_h_rec, cos_weight, spectral_weight=spectral_weight
-            )
-            loss_kl = (
-                kl_divergence(mu, logvar)
-                if mu is not None and logvar is not None
-                else torch.tensor(0.0, device=device)
-            )
-            loss = loss_rec + kl_weight * loss_kl
-
-            loss_pixel_direct = torch.tensor(0.0, device=device)
-            loss_ssim = torch.tensor(0.0, device=device)
-            loss_disc_val = torch.tensor(0.0, device=device)
-            loss_gen_val = torch.tensor(0.0, device=device)
-            x_rec = None
-
-            if pixel_decoder is not None:
-                if args.encoder_type == "precomputed" and pixel_target is None:
-                    raise ValueError(
-                        "Precomputed adapter pixel decoding needs RGB targets. "
-                        "Set --precomputed_rgb_target_key to an HDF5 camera key."
-                    )
-                z_l_pd = z_l.detach() if stage == "svae" else z_l
-                x_rec = pixel_decoder(z_l_pd)
-                x_target = pixel_target.float() if pixel_target is not None else x.float()
-                if x_rec.shape[2:4] != x_target.shape[2:4]:
-                    B_, T_, H_o, W_o, C_ = x_rec.shape
-                    x_rec = (
-                        F.interpolate(
-                            x_rec.reshape(B_ * T_, H_o, W_o, C_).permute(0, 3, 1, 2),
-                            size=(x_target.shape[2], x_target.shape[3]),
-                            mode="bilinear", align_corners=False,
-                        )
-                        .permute(0, 2, 3, 1)
-                        .reshape(B_, T_, x_target.shape[2], x_target.shape[3], C_)
-                    )
-                loss_pixel_direct = F.mse_loss(x_rec, x_target)
-
-                # ── MS-SSIM loss (inside autocast is fine, it's lightweight) ──
-                if use_ssim:
-                    b_s, t_s, h_s, w_s, c_s = x_target.shape
-                    pred_nchw = x_rec.reshape(b_s * t_s, h_s, w_s, c_s).permute(0, 3, 1, 2).clamp(0, 1)
-                    tgt_nchw = x_target.reshape(b_s * t_s, h_s, w_s, c_s).permute(0, 3, 1, 2)
-                    loss_ssim = ssim_weight * (1.0 - _compute_ms_ssim(pred_nchw.float(), tgt_nchw.float()))
-
-                loss = loss + pixel_weight * (loss_pixel_direct + loss_ssim)
-
-        # ── LPIPS in float32 OUTSIDE autocast to avoid bf16 instability ───
-        if pixel_decoder is not None and lpips_vgg is not None and x_rec is not None:
-            lpips_active = total_samples_seen >= perceptual_warmup_samples
-            if lpips_active:
-                b_l, t_l, h_l, w_l, c_l = x_target.shape
+            # ── Forward (autocast for encoder + adapter + pixel MSE) ──────────
+            with torch.autocast(device_type="cuda", dtype=precision):
                 with torch.no_grad():
-                    rgbs_tgt = (x_target * 2 - 1).reshape(b_l * t_l, h_l, w_l, c_l).permute(0, 3, 1, 2).float()
-                rgbs_pred = (x_rec * 2 - 1).reshape(b_l * t_l, h_l, w_l, c_l).permute(0, 3, 1, 2).float()
-                lpips_loss = getattr(args, "lpips_weight", 0.5) * lpips_vgg(rgbs_tgt, rgbs_pred).mean()
-                loss = loss + pixel_weight * lpips_loss
+                    f_h = autoencoder.encode(x)
 
-        # ── Generator step (discriminator GAN loss on generator) ──────────
-        disc_active = use_discriminator and discriminator is not None and total_samples_seen >= disc_start_samples
-        if disc_active and x_rec is not None:
-            requires_grad(discriminator, False)
-            b_g, t_g, h_g, w_g, c_g = x_rec.shape
-            fake_nchw = x_rec.reshape(b_g * t_g, h_g, w_g, c_g).permute(0, 3, 1, 2).float()
-            fake_logits = discriminator(fake_nchw)
-            g_loss = hinge_loss_gen(fake_logits)
+                enc_out = adapter_no_ddp.encode(f_h)
+                if isinstance(enc_out, tuple):
+                    z_l, mu, logvar = enc_out
+                else:
+                    z_l, mu, logvar = enc_out, None, None
 
-            # Adaptive weight via last pixel decoder layer
-            last_layer_w = pixel_decoder_no_ddp.conv_out.weight
-            ada_w = adaptive_weight(loss, g_loss, last_layer_w)
-            loss_gen_val = disc_weight_cfg * ada_w * g_loss
-            loss = loss + loss_gen_val
+                f_h_rec = adapter_no_ddp.decode(z_l)
+                loss_rec, loss_mse, loss_cos = semantic_reconstruction_loss(
+                    f_h, f_h_rec, cos_weight, spectral_weight=spectral_weight
+                )
+                loss_kl = (
+                    kl_divergence(mu, logvar)
+                    if mu is not None and logvar is not None
+                    else torch.tensor(0.0, device=device)
+                )
+                loss = loss_rec + kl_weight * loss_kl
 
-        optimizer.zero_grad()
-        loss.backward()
+                loss_pixel_direct = torch.tensor(0.0, device=device)
+                loss_ssim = torch.tensor(0.0, device=device)
+                loss_disc_val = torch.tensor(0.0, device=device)
+                loss_gen_val = torch.tensor(0.0, device=device)
+                x_rec = None
+
+                if pixel_decoder is not None:
+                    if args.encoder_type == "precomputed" and pixel_target is None:
+                        raise ValueError(
+                            "Precomputed adapter pixel decoding needs RGB targets. "
+                            "Set --precomputed_rgb_target_key to an HDF5 camera key."
+                        )
+                    z_l_pd = z_l.detach() if stage == "svae" else z_l
+                    x_rec = pixel_decoder(z_l_pd)
+                    x_target = pixel_target.float() if pixel_target is not None else x.float()
+                    if x_rec.shape[2:4] != x_target.shape[2:4]:
+                        B_, T_, H_o, W_o, C_ = x_rec.shape
+                        x_rec = (
+                            F.interpolate(
+                                x_rec.reshape(B_ * T_, H_o, W_o, C_).permute(0, 3, 1, 2),
+                                size=(x_target.shape[2], x_target.shape[3]),
+                                mode="bilinear", align_corners=False,
+                            )
+                            .permute(0, 2, 3, 1)
+                            .reshape(B_, T_, x_target.shape[2], x_target.shape[3], C_)
+                        )
+                    loss_pixel_direct = F.mse_loss(x_rec, x_target)
+
+                    # ── MS-SSIM loss (inside autocast is fine, it's lightweight) ──
+                    if use_ssim:
+                        b_s, t_s, h_s, w_s, c_s = x_target.shape
+                        pred_nchw = x_rec.reshape(b_s * t_s, h_s, w_s, c_s).permute(0, 3, 1, 2).clamp(0, 1)
+                        tgt_nchw = x_target.reshape(b_s * t_s, h_s, w_s, c_s).permute(0, 3, 1, 2)
+                        loss_ssim = ssim_weight * (1.0 - _compute_ms_ssim(pred_nchw.float(), tgt_nchw.float()))
+
+                    loss = loss + pixel_weight * (loss_pixel_direct + loss_ssim)
+
+            # ── LPIPS in float32 OUTSIDE autocast to avoid bf16 instability ───
+            if pixel_decoder is not None and lpips_vgg is not None and x_rec is not None:
+                lpips_active = total_samples_seen >= perceptual_warmup_samples
+                if lpips_active:
+                    b_l, t_l, h_l, w_l, c_l = x_target.shape
+                    with torch.no_grad():
+                        rgbs_tgt = (x_target * 2 - 1).reshape(b_l * t_l, h_l, w_l, c_l).permute(0, 3, 1, 2).float()
+                    rgbs_pred = (x_rec * 2 - 1).reshape(b_l * t_l, h_l, w_l, c_l).permute(0, 3, 1, 2).float()
+                    lpips_loss = getattr(args, "lpips_weight", 0.5) * lpips_vgg(rgbs_tgt, rgbs_pred).mean()
+                    loss = loss + pixel_weight * lpips_loss
+
+            # ── Generator step (discriminator GAN loss on generator) ──────────
+            disc_active = use_discriminator and discriminator is not None and total_samples_seen >= disc_start_samples
+            if disc_active and x_rec is not None:
+                requires_grad(discriminator, False)
+                b_g, t_g, h_g, w_g, c_g = x_rec.shape
+                fake_nchw = x_rec.reshape(b_g * t_g, h_g, w_g, c_g).permute(0, 3, 1, 2).float()
+                fake_logits = discriminator(fake_nchw)
+                g_loss = hinge_loss_gen(fake_logits)
+
+                # Adaptive weight via last pixel decoder layer
+                last_layer_w = pixel_decoder_no_ddp.conv_out.weight
+                ada_w = adaptive_weight(loss, g_loss, last_layer_w)
+                loss_gen_val = disc_weight_cfg * ada_w * g_loss
+                loss = loss + loss_gen_val
+
+            (loss / grad_accum_steps).backward()
+
+            # ── Discriminator gradients ───────────────────────────────────────
+            if disc_active and x_rec is not None and disc_optimizer is not None:
+                requires_grad(discriminator, True)
+                with torch.no_grad():
+                    b_d, t_d, h_d, w_d, c_d = x_rec.shape
+                    fake_nchw_d = x_rec.reshape(b_d * t_d, h_d, w_d, c_d).permute(0, 3, 1, 2).float()
+                    real_nchw_d = x_target.reshape(b_d * t_d, h_d, w_d, c_d).permute(0, 3, 1, 2).float()
+                real_logits = discriminator(real_nchw_d)
+                fake_logits_d = discriminator(fake_nchw_d.detach())
+                loss_disc_val = hinge_loss_disc(real_logits, fake_logits_d)
+                (loss_disc_val / grad_accum_steps).backward()
+
+            running_loss += loss.item()
+            running_mse += loss_mse.item()
+            running_cos += loss_cos.item()
+            running_pixel += loss_pixel_direct.item()
+            running_ssim_loss += loss_ssim.item()
+            running_disc_loss += loss_disc_val.item()
+            running_gen_loss += loss_gen_val.item() if isinstance(loss_gen_val, torch.Tensor) else loss_gen_val
+            num_batches += 1
+            total_samples_seen += args.batch_size * world_size
+
         grad_norm = nn.utils.clip_grad_norm_(adapter_params, max_norm=1.0)
         if pd_params:
             nn.utils.clip_grad_norm_(pd_params, max_norm=1.0)
         optimizer.step()
-
-        # ── Discriminator step ────────────────────────────────────────────
-        if disc_active and x_rec is not None and disc_optimizer is not None:
-            requires_grad(discriminator, True)
-            disc_optimizer.zero_grad()
-            with torch.no_grad():
-                b_d, t_d, h_d, w_d, c_d = x_rec.shape
-                fake_nchw_d = x_rec.reshape(b_d * t_d, h_d, w_d, c_d).permute(0, 3, 1, 2).float()
-                real_nchw_d = x_target.reshape(b_d * t_d, h_d, w_d, c_d).permute(0, 3, 1, 2).float()
-            real_logits = discriminator(real_nchw_d)
-            fake_logits_d = discriminator(fake_nchw_d.detach())
-            loss_disc_val = hinge_loss_disc(real_logits, fake_logits_d)
-            loss_disc_val.backward()
-            disc_optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
 
         if disc_optimizer is not None:
-            requires_grad(discriminator, True)
+            disc_optimizer.step()
+            disc_optimizer.zero_grad(set_to_none=True)
 
         lr_scheduler.step()
-        running_loss += loss.item()
-        running_mse += loss_mse.item()
-        running_cos += loss_cos.item()
-        running_pixel += loss_pixel_direct.item()
-        running_ssim_loss += loss_ssim.item()
-        running_disc_loss += loss_disc_val.item()
-        running_gen_loss += loss_gen_val.item() if isinstance(loss_gen_val, torch.Tensor) else loss_gen_val
-        num_batches += 1
-        total_samples_seen += args.batch_size * world_size
         train_steps += 1
 
         if pbar is not None:

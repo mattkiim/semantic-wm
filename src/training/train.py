@@ -107,7 +107,9 @@ def train_wm(args) -> None:
     )
 
     samples_per_epoch = len(train_dataset)
-    steps_per_epoch = samples_per_epoch // (args.batch_size * world_size)
+    grad_accum_steps = max(int(getattr(args, "gradient_accumulation_steps", 1)), 1)
+    micro_steps_per_epoch = max(samples_per_epoch // (args.batch_size * world_size), 1)
+    steps_per_epoch = max(micro_steps_per_epoch // grad_accum_steps, 1)
     max_train_steps = args.num_epochs * steps_per_epoch
 
     if rank == 0:
@@ -227,17 +229,17 @@ def train_wm(args) -> None:
     train_steps, resumed_samples = load_training_checkpoint(
         checkpoint_dir, model_no_ddp, ema, optimizer, lr_scheduler, device
     )
-    current_epoch = train_steps // steps_per_epoch
+    current_epoch = (train_steps * grad_accum_steps) // micro_steps_per_epoch
     total_samples_seen = (
         resumed_samples if resumed_samples is not None
-        else train_steps * args.batch_size * world_size
+        else train_steps * args.batch_size * world_size * grad_accum_steps
     )
 
     if train_sampler is not None:
         train_sampler.set_epoch(current_epoch)
     train_iter = iter(train_loader)
     if train_steps > 0:
-        batches_to_skip = train_steps % steps_per_epoch
+        batches_to_skip = (train_steps * grad_accum_steps) % micro_steps_per_epoch
         for _ in range(batches_to_skip):
             try:
                 next(train_iter)
@@ -264,69 +266,71 @@ def train_wm(args) -> None:
     if pbar is not None:
         pbar.n = train_steps
         pbar.refresh()
+    optimizer.zero_grad(set_to_none=True)
 
     # ── Training loop ─────────────────────────────────────────────────────────
     while train_steps < max_train_steps:
-        try:
-            batch = next(train_iter)
-        except StopIteration:
-            current_epoch += 1
-            if train_sampler is not None:
-                train_sampler.set_epoch(current_epoch)
-            train_iter = iter(train_loader)
-            batch = next(train_iter)
-        x, actions, tactile = _unpack_batch(batch)
+        for _ in range(grad_accum_steps):
+            try:
+                batch = next(train_iter)
+            except StopIteration:
+                current_epoch += 1
+                if train_sampler is not None:
+                    train_sampler.set_epoch(current_epoch)
+                train_iter = iter(train_loader)
+                batch = next(train_iter)
+            x, actions, tactile = _unpack_batch(batch)
 
-        # Unfreeze backbone after freeze period
-        if backbone_frozen and train_steps >= freeze_backbone_steps:
-            requires_grad(model_no_ddp, True)
-            backbone_frozen = False
-            if rank == 0:
-                logging.info("Unfreezing backbone at step %d", train_steps)
+            # Unfreeze backbone after freeze period
+            if backbone_frozen and train_steps >= freeze_backbone_steps:
+                requires_grad(model_no_ddp, True)
+                backbone_frozen = False
+                if rank == 0:
+                    logging.info("Unfreezing backbone at step %d", train_steps)
 
-        x, actions = x.to(device), actions.to(device)
-        if tactile is not None:
-            tactile = tactile.to(device)
-        with torch.autocast(device_type="cuda", dtype=precision):
-            if num_views > 1:
-                # x: (B, V, T, H, W, C) -> encode each view independently
-                B_mv, V, T_mv = x.shape[:3]
-                x = einops.rearrange(x, "b v t h w c -> (b v) t h w c")
-                x = autoencoder.encode(x)
-                if not is_identity_adapter:
-                    x = adapter.encode(x)
-                    if isinstance(x, tuple):
-                        x = x[0]
-                x = einops.rearrange(x, "(b v) t h w c -> b t h (v w) c", v=V)
-            else:
-                x = autoencoder.encode(x)
-                if not is_identity_adapter:
-                    x = adapter.encode(x)
-                    if isinstance(x, tuple):
-                        x = x[0]
-            if temporal_ds > 1:
-                actions = downsample_actions_temporal(actions, temporal_ds)
-                if tactile is not None:
-                    tactile = downsample_sequence_temporal(tactile, temporal_ds)
-            loss = diffusion.loss_fn(
-                model,
-                x,
-                actions,
-                num_history=effective_num_history,
-                tactile=tactile,
-            )
+            x, actions = x.to(device), actions.to(device)
+            if tactile is not None:
+                tactile = tactile.to(device)
+            with torch.autocast(device_type="cuda", dtype=precision):
+                if num_views > 1:
+                    # x: (B, V, T, H, W, C) -> encode each view independently
+                    B_mv, V, T_mv = x.shape[:3]
+                    x = einops.rearrange(x, "b v t h w c -> (b v) t h w c")
+                    x = autoencoder.encode(x)
+                    if not is_identity_adapter:
+                        x = adapter.encode(x)
+                        if isinstance(x, tuple):
+                            x = x[0]
+                    x = einops.rearrange(x, "(b v) t h w c -> b t h (v w) c", v=V)
+                else:
+                    x = autoencoder.encode(x)
+                    if not is_identity_adapter:
+                        x = adapter.encode(x)
+                        if isinstance(x, tuple):
+                            x = x[0]
+                if temporal_ds > 1:
+                    actions = downsample_actions_temporal(actions, temporal_ds)
+                    if tactile is not None:
+                        tactile = downsample_sequence_temporal(tactile, temporal_ds)
+                loss = diffusion.loss_fn(
+                    model,
+                    x,
+                    actions,
+                    num_history=effective_num_history,
+                    tactile=tactile,
+                )
 
-        optimizer.zero_grad()
-        loss.backward()
+            (loss / grad_accum_steps).backward()
+            running_loss += loss.detach().cpu()
+            num_batches += 1
+            total_samples_seen += args.batch_size * world_size
+
         max_norm = args.max_grad_norm if args.max_grad_norm > 0 else float("inf")
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
         optimizer.step()
         lr_scheduler.step()
         update_ema(ema, model_no_ddp, args.ema_decay)
-
-        running_loss += loss.detach().cpu()
-        num_batches += 1
-        total_samples_seen += args.batch_size * world_size
+        optimizer.zero_grad(set_to_none=True)
         train_steps += 1
 
         if pbar is not None:

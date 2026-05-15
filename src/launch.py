@@ -43,6 +43,8 @@ def get_configs():
                         help="NPZ key for tactile vectors in MP4 datasets.")
     parser.add_argument("--num_workers", type=int, default=6)
     parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=1,
+                        help="Number of microbatches to accumulate before each optimizer step.")
     parser.add_argument("--timesteps", type=int, default=1000)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--lr_new", type=float, default=1e-4)

@@ -48,6 +48,8 @@ def get_configs():
     parser.add_argument("--input_w", type=int, default=256)
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=1,
+                        help="Number of microbatches to accumulate before each optimizer step.")
     parser.add_argument(
         "--variable_history_sampling", type=lambda x: x.lower() == "true", default=False
     )
@@ -231,7 +233,7 @@ def get_configs():
     parser.add_argument("--warmup_epochs", type=int, default=1)
     parser.add_argument("--min_lr_ratio", type=float, default=0.9)
     parser.add_argument("--precision", type=str, default="bfloat16")
-    parser.add_argument("--compile_models", type=lambda x: x.lower() == "true", default=False,
+    parser.add_argument("--compile_models", type=lambda x: x.lower() == "true", default=True,
                         help="Compile adapter, encoder encode path, and pixel decoder with torch.compile.")
 
     # ---- Logging / checkpoints ----------------------------------------------

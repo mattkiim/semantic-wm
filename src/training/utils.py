@@ -130,14 +130,16 @@ def log_training_config(
     max_train_steps: int,
     world_size: int,
 ) -> None:
+    grad_accum = max(int(getattr(args, "gradient_accumulation_steps", 1)), 1)
     logging.info(
-        "Training config | dataset=%d  batch/gpu=%d  gpus=%d  eff_batch=%d  "
-        "steps/epoch=%d  epochs=%d  total_steps=%d  "
+        "Training config | dataset=%d  batch/gpu=%d  grad_accum=%d  gpus=%d  eff_batch=%d  "
+        "updates/epoch=%d  epochs=%d  total_updates=%d  "
         "log_every=%d  val_every=%d  history=%d  lr=%.2e",
         dataset_size,
         args.batch_size,
+        grad_accum,
         world_size,
-        args.batch_size * world_size,
+        args.batch_size * world_size * grad_accum,
         steps_per_epoch,
         args.num_epochs,
         max_train_steps,

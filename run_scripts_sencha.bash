@@ -45,10 +45,11 @@ CUDA_VISIBLE_DEVICES=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python -
   --wandb_mode online \
   --wandb_entity mattkiim-learning \
   --wandb_project_name semantic-wm \
-  --num_epochs 1000 \
+  --warmup_epochs 100 \
+  --num_epochs 4000 \
   --log_every_samples 1000 \
   --validate_every_samples 10000 \
   --use_pixel_decoder_for_val True \
   --save_model True \
-  --checkpoint_dir outputs/dit_dinov3_precomputed_tactile_v1_do_0.2_cls_new_adapter
+  --checkpoint_dir outputs/dit_dinov3_precomputed_tactile_v1_do_0.2_cls_new_adapter_long
 

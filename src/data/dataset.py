@@ -34,6 +34,21 @@ def _prepare_tactile_array(tactile) -> np.ndarray:
     return tactile
 
 
+def _previous_sample_action_indices(step_indices: Sequence[int]) -> np.ndarray:
+    """Map sampled observation indices to previous sampled action indices."""
+    step_indices = list(step_indices)
+    if not step_indices:
+        return np.array([], dtype=np.int64)
+    positive_gaps = [
+        curr - prev
+        for prev, curr in zip(step_indices, step_indices[1:])
+        if curr > prev
+    ]
+    first_gap = positive_gaps[0] if positive_gaps else 1
+    first_action_idx = max(step_indices[0] - first_gap, 0)
+    return np.array([first_action_idx] + step_indices[:-1], dtype=np.int64)
+
+
 class H5EmbeddingDataset(Dataset):
     """Loads pre-computed backbone patch embeddings from HDF5 (combined_v3 format).
 
@@ -146,7 +161,11 @@ class H5EmbeddingDataset(Dataset):
             idx_arr = np.array(step_indices)
             unique_sorted, inverse = np.unique(idx_arr, return_inverse=True)
             emb = traj[self.embedding_key][unique_sorted.tolist()][inverse]
-            actions = traj["actions"][unique_sorted.tolist()][inverse]
+            action_idx_arr = _previous_sample_action_indices(step_indices)
+            action_unique_sorted, action_inverse = np.unique(
+                action_idx_arr, return_inverse=True
+            )
+            actions = traj["actions"][action_unique_sorted.tolist()][action_inverse]
             tactile = (
                 traj[self.tactile_key][unique_sorted.tolist()][inverse]
                 if self.use_tactile else None
@@ -197,7 +216,11 @@ class H5EmbeddingDataset(Dataset):
 
         # embeddings: (n_frames, N_patches, D) → reshape to (n_frames, patch_h, patch_w, D)
         emb = traj[self.embedding_key][unique_sorted.tolist()][inverse]
-        actions = traj["actions"][unique_sorted.tolist()][inverse]
+        action_idx_arr = _previous_sample_action_indices(step_indices)
+        action_unique_sorted, action_inverse = np.unique(
+            action_idx_arr, return_inverse=True
+        )
+        actions = traj["actions"][action_unique_sorted.tolist()][action_inverse]
         tactile = (
             traj[self.tactile_key][unique_sorted.tolist()][inverse]
             if self.use_tactile
@@ -359,13 +382,10 @@ class H5TrajectoryDataset(Dataset):
         unique_sorted, inverse = np.unique(idx_arr, return_inverse=True)
         frames = traj[self.camera_key][unique_sorted.tolist()][inverse]
 
-        # Observations are indexed by step_indices, but action a_t leads to
-        # obs_{t+1}. Shift action conditioning back one step so each observed
-        # target frame receives the transition action that produced it.
-        action_idx_arr = np.array([max(si - 1, 0) for si in step_indices])
-        import ipdb; ipdb.set_trace()
-        print(idx_arr)
-        print(action_idx_arr)
+        # Observations are subsampled by frame_skip. Condition each sampled
+        # observation on the action at the previous sampled observation, so
+        # obs_{current+2} receives action_{current} when frame_skip=2.
+        action_idx_arr = _previous_sample_action_indices(step_indices)
         action_unique_sorted, action_inverse = np.unique(
             action_idx_arr, return_inverse=True
         )

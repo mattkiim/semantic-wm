@@ -1,4 +1,4 @@
-"""Spill classifier operating on adapter latents."""
+"""Spill classifier operating directly on raw patch embeddings."""
 
 from __future__ import annotations
 
@@ -9,40 +9,46 @@ import torch.nn as nn
 class SpillClassifier(nn.Module):
     """Binary spill classifier.
 
-    Encodes raw patch embeddings through a frozen adapter, then applies a
-    per-patch MLP followed by mean-pooling to produce a per-frame logit.
+    Operates on raw patch embeddings (no adapter). Optionally fuses tactile
+    by broadcasting the tactile CLS token to each RGB patch before the MLP.
 
-    Can also classify directly from pre-encoded adapter latents (e.g. WM
-    outputs) by calling :meth:`forward_from_latent`.
+    Architecture: LayerNorm → Linear → ReLU → Linear(1) → mean over patches → logit per frame.
     """
 
-    def __init__(self, adapter: nn.Module, latent_dim: int = 96, hidden_dim: int = 256) -> None:
+    def __init__(self, input_dim: int, hidden_dim: int = 256) -> None:
         super().__init__()
-        self.adapter = adapter
-        for p in self.adapter.parameters():
-            p.requires_grad_(False)
-
         self.head = nn.Sequential(
-            nn.Linear(latent_dim, hidden_dim),
-            nn.GELU(),
+            nn.LayerNorm(input_dim),
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
             nn.Linear(hidden_dim, 1),
         )
 
-    def _encode(self, x: torch.Tensor) -> torch.Tensor:
-        """x: (B, T, H, W, D) → latent (B, T, H, W, latent_dim)."""
-        with torch.no_grad():
-            z = self.adapter.encode(x)
-        if isinstance(z, tuple):
-            z = z[0]
-        return z
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """x: (B, T, H, W, D) or (B, T, N, D) → logits (B, T)."""
+        if x.dim() == 5:
+            B, T, H, W, D = x.shape
+            x = x.reshape(B, T, H * W, D)
+        B, T, N, D = x.shape
+        logits = self.head(x.reshape(B * T, N, D)).squeeze(-1)  # (B*T, N)
+        return logits.mean(dim=-1).reshape(B, T)                 # (B, T)
 
     def forward_from_latent(self, z: torch.Tensor) -> torch.Tensor:
-        """z: (B, T, H, W, latent_dim) or (B, T, N, latent_dim) → logits (B, T)."""
-        B, T = z.shape[:2]
-        z_flat = z.reshape(B * T, -1, z.shape[-1])     # (B*T, N, latent_dim)
-        logits = self.head(z_flat).squeeze(-1)           # (B*T, N)
-        return logits.mean(dim=-1).reshape(B, T)         # (B, T)
+        """Alias so eval_classifier.py works unchanged."""
+        return self.forward(z)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """x: (B, T, H, W, D) raw patch embeddings → logits (B, T)."""
-        return self.forward_from_latent(self._encode(x))
+
+def fuse_tactile(emb: torch.Tensor, tactile: torch.Tensor) -> torch.Tensor:
+    """Broadcast tactile CLS token to each RGB patch and concatenate.
+
+    Args:
+        emb:     (B, T, H, W, D_rgb) raw patch embeddings
+        tactile: (B, T, D_tact) CLS token
+
+    Returns:
+        (B, T, H*W, D_rgb + D_tact)
+    """
+    B, T, H, W, D = emb.shape
+    x = emb.reshape(B, T, H * W, D)
+    t = tactile.unsqueeze(2).expand(-1, -1, H * W, -1)  # (B, T, N, D_tact)
+    return torch.cat([x, t], dim=-1)

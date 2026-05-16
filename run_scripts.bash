@@ -105,7 +105,7 @@ CUDA_VISIBLE_DEVICES=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python -
 
 
 # --   DiT on precomputed DinoV3 + tactile   -- #
-CUDA_VISIBLE_DEVICES=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python -m src.launch \
+CUDA_VISIBLE_DEVICES=0 python -m src.launch \
   --h5_train_path /extra_storage/mkim/data/consolidated_train_backbone_labeled_new.h5 \
   --h5_val_path /extra_storage/mkim/data/consolidated_val_backbone_labeled_new.h5 \
   --encoder_type precomputed \
@@ -162,3 +162,59 @@ CUDA_VISIBLE_DEVICES=0 python -m src.eval_spill \
   --action_dim 7 \
   --use_pixel_decoder_for_val True \
   --output_dir eval_outputs/spill_rgb_v2
+
+
+
+  # --- Classifier Stuff --- #
+
+  # MM eval
+  CUDA_VISIBLE_DEVICES=0 python -m src.eval_classifier \
+  --classifier_checkpoint_path outputs/classifier_mm/classifier_best.pt \
+  --adapter_checkpoint_path outputs/adapter_dinov3_precomputed_pixel_bs4_ga4/adapter_ckpt_000000117936.pt \
+  --wm_checkpoint_path outputs/dit_dinov3_precomputed_tactile_v1_do_0.2_cls_new_adapter_long/ckpt_samples_000000771232.pt \
+  --h5_val_path /extra_storage/mkim/data/consolidated_val_backbone_labeled_new.h5 \
+  --encoder_type precomputed \
+  --adapter_type svae \
+  --adapter_latent_dim 96 \
+  --use_tactile True \
+  --tactile_dim 512 \
+  --h5_tactile_key cam_tactile_cls_embd \
+  --use_pixel_decoder_for_val True \
+  --output_dir eval_outputs/classifier_mm
+
+  # MM train
+  CUDA_VISIBLE_DEVICES=0 python -m src.launch_classifier \
+    --h5_train_path /extra_storage/mkim/data/consolidated_train_backbone_labeled_new.h5 \
+    --h5_val_path /extra_storage/mkim/data/consolidated_val_backbone_labeled_new.h5 \
+    --encoder_type precomputed \
+    --adapter_type svae \
+    --adapter_checkpoint_path outputs/adapter_dinov3_precomputed_pixel_bs4_ga4/adapter_ckpt_000000117936.pt \
+    --adapter_latent_dim 96 \
+    --use_tactile True \
+    --tactile_dim 512 \
+    --h5_tactile_key cam_tactile_cls_embd \
+    --wandb_entity mattkiim-learning \
+    --checkpoint_dir outputs/classifier_mm
+
+  # RGB eval
+  CUDA_VISIBLE_DEVICES=0 python -m src.eval_classifier \
+    --classifier_checkpoint_path outputs/classifier_rgb/classifier_best.pt \
+    --adapter_checkpoint_path outputs/adapter_dinov3_precomputed_pixel_bs4_ga4/adapter_ckpt_000000117936.pt \
+    --wm_checkpoint_path outputs/dit_dinov3_precomputed_tactile_v1_do_0.2_cls_new_adapter_long/ckpt_samples_000000771232.pt \
+    --h5_val_path /extra_storage/mkim/data/consolidated_val_backbone_labeled_new.h5 \
+    --encoder_type precomputed \
+    --adapter_type svae \
+    --adapter_latent_dim 96 \
+    --use_pixel_decoder_for_val True \
+    --output_dir eval_outputs/classifier_rgb
+
+  # RGB train
+  CUDA_VISIBLE_DEVICES=0 python -m src.launch_classifier \
+    --h5_train_path /extra_storage/mkim/data/consolidated_train_backbone_labeled_new.h5 \
+    --h5_val_path /extra_storage/mkim/data/consolidated_val_backbone_labeled_new.h5 \
+    --encoder_type precomputed \
+    --adapter_type svae \
+    --adapter_checkpoint_path outputs/adapter_dinov3_precomputed_pixel_bs4_ga4/adapter_ckpt_000000117936.pt \
+    --adapter_latent_dim 96 \
+    --wandb_entity mattkiim-learning \
+    --checkpoint_dir outputs/classifier_rgb

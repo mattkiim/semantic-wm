@@ -325,16 +325,16 @@ def evaluate_classifier(args):
     n_windows = len(all_probs) // max(1, (args.n_frames - n_ctx))
     results = {
         "wm_auc": wm_auc, "gt_auc": gt_auc,
-        "wm_tp": wm_tp, "wm_tn": wm_tn, "wm_fp": wm_fp, "wm_fn": wm_fn,
-        "gt_tp": gt_tp, "gt_tn": gt_tn, "gt_fp": gt_fp, "gt_fn": gt_fn,
+        "wm_true_unsafe": wm_tp, "wm_true_safe": wm_tn, "wm_false_unsafe": wm_fp, "wm_false_safe": wm_fn,
+        "gt_true_unsafe": gt_tp, "gt_true_safe": gt_tn, "gt_false_unsafe": gt_fp, "gt_false_safe": gt_fn,
         "n_windows": n_windows, "spill_only": spill_only, "n_videos": n_videos_saved,
     }
 
     print(f"\n=== Classifier Eval (spill_only={spill_only}) ===")
     print(f"  GT AUC (classifier ceiling) : {gt_auc:.4f}")
-    print(f"  GT  TP={gt_tp}  TN={gt_tn}  FP={gt_fp}  FN={gt_fn}")
+    print(f"  GT  true_unsafe={gt_tp}  true_safe={gt_tn}  false_unsafe={gt_fp}  false_safe={gt_fn}")
     print(f"  WM AUC (end-to-end)         : {wm_auc:.4f}")
-    print(f"  WM  TP={wm_tp}  TN={wm_tn}  FP={wm_fp}  FN={wm_fn}")
+    print(f"  WM  true_unsafe={wm_tp}  true_safe={wm_tn}  false_unsafe={wm_fp}  false_safe={wm_fn}")
     print(f"  Gap (GT - WM)               : {gt_auc - wm_auc:.4f}")
     print(f"  Windows                     : {n_windows}")
     if make_videos:

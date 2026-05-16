@@ -103,7 +103,7 @@ class H5EmbeddingDataset(Dataset):
         split: ``"train"`` or ``"test"``/``"val"``.
     """
 
-    def __init__(self, args, split: str = "train", spill_only: bool = False) -> None:
+    def __init__(self, args, split: str = "train", spill_only: bool = False, spill_windows_per_transition: int = 3) -> None:
         super().__init__()
 
         if split == "train":
@@ -132,6 +132,7 @@ class H5EmbeddingDataset(Dataset):
         self.variable_history_sampling = args.variable_history_sampling
         self.transform = transforms.Resize((int(args.input_h), int(args.input_w)))
         self.spill_only = spill_only
+        self.return_labels = bool(getattr(args, "return_labels", False))
 
         self._h5_file = None
 
@@ -160,27 +161,37 @@ class H5EmbeddingDataset(Dataset):
             self.traj_keys = valid_keys
             self.traj_lengths = valid_lengths
 
-            # Pre-index all windows that contain at least one label=1 (spill) frame.
+            # Pre-index windows around each 0→1 label transition.
             # Each entry is (traj_key, step_indices_list) for deterministic __getitem__.
             if spill_only:
                 self._spill_windows = []
                 skip = self.frame_skip
                 n_history = self.num_history
                 n_future = self.n_frames - n_history
+                half = spill_windows_per_transition // 2
                 for k, length in zip(valid_keys, valid_lengths):
                     if "labels" not in f[k]:
                         continue
                     labels = np.array(f[k]["labels"])
                     history_span = n_history * skip
                     future_span = (n_future - 1) * skip + 1
-                    for current_step in range(history_span, length - future_span + 1):
-                        indices = []
-                        for i in range(n_history, 0, -1):
-                            indices.append(max(0, current_step - i * skip))
-                        indices.append(current_step)
-                        for i in range(1, n_future):
-                            indices.append(min(current_step + i * skip, length - 1))
-                        if np.any(labels[indices] == 1):
+                    min_step = history_span
+                    max_step = length - future_span
+                    transitions = [
+                        t for t in range(1, len(labels))
+                        if labels[t - 1] == 0 and labels[t] == 1
+                    ]
+                    for t in transitions:
+                        for offset in range(-half, spill_windows_per_transition - half):
+                            current_step = t + offset * skip
+                            if not (min_step <= current_step <= max_step):
+                                continue
+                            indices = []
+                            for i in range(n_history, 0, -1):
+                                indices.append(max(0, current_step - i * skip))
+                            indices.append(current_step)
+                            for i in range(1, n_future):
+                                indices.append(min(current_step + i * skip, length - 1))
                             self._spill_windows.append((k, indices))
 
     def __len__(self) -> int:
@@ -215,7 +226,11 @@ class H5EmbeddingDataset(Dataset):
                 traj[self.rgb_target_key][unique_sorted.tolist()][inverse]
                 if self.return_rgb_target else None
             )
-            return self._pack(emb, actions, tactile, rgb_target)
+            out = self._pack(emb, actions, tactile, rgb_target)
+            if self.return_labels and "labels" in traj:
+                labels = torch.from_numpy(np.array(traj["labels"])[idx_arr]).long()
+                return (*out, labels)
+            return out
 
         key = self.traj_keys[idx]
         length = self.traj_lengths[idx]
@@ -277,7 +292,11 @@ class H5EmbeddingDataset(Dataset):
             actions.shape[1] == self.action_dim
         ), f"Unexpected action dim: {actions.shape[1]} != {self.action_dim}"
 
-        return self._pack(emb, actions, tactile, rgb_target)
+        out = self._pack(emb, actions, tactile, rgb_target)
+        if self.return_labels and "labels" in traj:
+            labels = torch.from_numpy(np.array(traj["labels"])[idx_arr]).long()
+            return (*out, labels)
+        return out
 
     def _pack(self, emb, actions, tactile, rgb_target):
         emb = torch.from_numpy(np.array(emb)).float()

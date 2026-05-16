@@ -63,7 +63,7 @@ CUDA_VISIBLE_DEVICES=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python -
   --action_dim 7 \
   --use_tactile True \
   --tactile_dim 512 \
-  --h5_tactile_key cam_tactile_cls_embd \
+  --tactile_embd cls \
   --tactile_dropout_prob 0.2 \
   --batch_size 16 \
   --gradient_accumulation_steps 1 \
@@ -114,7 +114,7 @@ CUDA_VISIBLE_DEVICES=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python -
   --action_dim 7 \
   --use_tactile True \
   --tactile_dim 512 \
-  --h5_tactile_key cam_tactile_cls_embd \
+  --tactile_embd cls \
   --tactile_dropout_prob 0.2 \
   --batch_size 16 \
   --gradient_accumulation_steps 1 \
@@ -142,6 +142,6 @@ CUDA_VISIBLE_DEVICES=0 python -m src.eval_spill \
   --action_dim 7 \
   --use_tactile True \
   --tactile_dim 512 \
-  --h5_tactile_key cam_tactile_cls_embd \
+  --tactile_embd cls \
   --use_pixel_decoder_for_val True \
   --output_dir eval_outputs/spill_tactile_v1

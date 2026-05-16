@@ -286,7 +286,8 @@ def get_configs():
     parser.add_argument("--action_dim", type=int, default=7)
     parser.add_argument("--use_tactile", type=lambda x: x.lower() == "true", default=False)
     parser.add_argument("--tactile_dim", type=int, default=0)
-    parser.add_argument("--h5_tactile_key", type=str, default="cam_tactile_patch_embd")
+    parser.add_argument("--tactile_embd", type=str, choices=["cls", "mean"], default="cls")
+    parser.add_argument("--h5_tactile_key", type=str, default=None)
 
     # ── Encoder ──────────────────────────────────────────────────────────
     parser.add_argument("--encoder_type", type=str, default="precomputed",

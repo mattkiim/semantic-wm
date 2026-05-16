@@ -27,10 +27,50 @@ def _npz_array(npz_data, key: str):
     raise KeyError(key)
 
 
-def _prepare_tactile_array(tactile) -> np.ndarray:
+def _resolve_tactile_embd(args) -> str:
+    tactile_embd = str(getattr(args, "tactile_embd", "cls")).lower()
+    if tactile_embd not in {"cls", "mean"}:
+        raise ValueError(
+            f"Unknown tactile_embd={tactile_embd!r}; expected 'cls' or 'mean'"
+        )
+    return tactile_embd
+
+
+def _resolve_h5_tactile_key(args) -> str:
+    key = getattr(args, "h5_tactile_key", None)
+    tactile_embd = _resolve_tactile_embd(args)
+    if key:
+        key_lower = str(key).lower()
+        if tactile_embd == "mean" and "cls" in key_lower:
+            raise ValueError(
+                "--tactile_embd mean expects patch-token tactile features, but "
+                f"--h5_tactile_key was set to {key!r}"
+            )
+        if tactile_embd == "cls" and "patch" in key_lower:
+            raise ValueError(
+                "--tactile_embd cls expects CLS tactile features, but "
+                f"--h5_tactile_key was set to {key!r}"
+            )
+        return str(key)
+    if tactile_embd == "cls":
+        return "cam_tactile_cls_embd"
+    return "cam_tactile_patch_embd"
+
+
+def _prepare_tactile_array(tactile, tactile_embd: str = "cls") -> np.ndarray:
     tactile = np.array(tactile)
-    if tactile.ndim > 2:
+    if tactile.ndim <= 2:
+        return tactile
+    if tactile_embd == "mean":
         tactile = tactile.mean(axis=tuple(range(1, tactile.ndim - 1)))
+    elif tactile_embd == "cls":
+        tactile = tactile[
+            (slice(None),) + (0,) * (tactile.ndim - 2) + (slice(None),)
+        ]
+    else:
+        raise ValueError(
+            f"Unknown tactile_embd={tactile_embd!r}; expected 'cls' or 'mean'"
+        )
     return tactile
 
 
@@ -85,7 +125,8 @@ class H5EmbeddingDataset(Dataset):
         self.action_dim = int(args.action_dim)
         self.use_tactile = _tactile_enabled(args)
         self.tactile_dim = int(getattr(args, "tactile_dim", 0))
-        self.tactile_key = str(getattr(args, "h5_tactile_key", "cam_tactile_patch_embd"))
+        self.tactile_embd = _resolve_tactile_embd(args)
+        self.tactile_key = _resolve_h5_tactile_key(args)
         self.return_rgb_target = bool(getattr(args, "return_rgb_target", False))
         self.rgb_target_key = str(getattr(args, "precomputed_rgb_target_key", "camera_0"))
         self.variable_history_sampling = args.variable_history_sampling
@@ -255,7 +296,9 @@ class H5EmbeddingDataset(Dataset):
         if tactile is None:
             return emb, actions, rgb_target
 
-        tactile = torch.from_numpy(_prepare_tactile_array(tactile)).float()
+        tactile = torch.from_numpy(
+            _prepare_tactile_array(tactile, self.tactile_embd)
+        ).float()
         if self.tactile_dim > 0:
             assert (
                 tactile.shape[1] == self.tactile_dim
@@ -301,7 +344,8 @@ class H5TrajectoryDataset(Dataset):
         self.action_dim = int(args.action_dim)
         self.use_tactile = _tactile_enabled(args)
         self.tactile_dim = int(getattr(args, "tactile_dim", 0))
-        self.tactile_key = str(getattr(args, "h5_tactile_key", "cam_tactile_patch_embd"))
+        self.tactile_embd = _resolve_tactile_embd(args)
+        self.tactile_key = _resolve_h5_tactile_key(args)
         self.variable_history_sampling = args.variable_history_sampling
         self.camera_key = str(getattr(args, "h5_camera_key", "camera_0"))
         self.transform = transforms.Resize((int(args.input_h), int(args.input_w)))
@@ -409,7 +453,9 @@ class H5TrajectoryDataset(Dataset):
         if tactile is None:
             return frames, actions
 
-        tactile = torch.from_numpy(_prepare_tactile_array(tactile)).float()
+        tactile = torch.from_numpy(
+            _prepare_tactile_array(tactile, self.tactile_embd)
+        ).float()
         if self.tactile_dim > 0:
             assert (
                 tactile.shape[1] == self.tactile_dim
@@ -457,6 +503,7 @@ class OpenXMP4VideoDataset(Dataset):
         self.action_dim = int(args.action_dim)
         self.use_tactile = _tactile_enabled(args)
         self.tactile_dim = int(getattr(args, "tactile_dim", 0))
+        self.tactile_embd = _resolve_tactile_embd(args)
         self.tactile_key = str(getattr(args, "tactile_npz_key", "tactile"))
         self.variable_history_sampling = args.variable_history_sampling
 
@@ -579,7 +626,9 @@ class OpenXMP4VideoDataset(Dataset):
         if tactile is None:
             return clip, actions
 
-        tactile = torch.from_numpy(_prepare_tactile_array(tactile)).float()
+        tactile = torch.from_numpy(
+            _prepare_tactile_array(tactile, self.tactile_embd)
+        ).float()
         if self.tactile_dim > 0:
             assert (
                 tactile.shape[1] == self.tactile_dim
@@ -619,6 +668,7 @@ class MultiViewMP4VideoDataset(OpenXMP4VideoDataset):
         self.action_dim = int(args.action_dim)
         self.use_tactile = _tactile_enabled(args)
         self.tactile_dim = int(getattr(args, "tactile_dim", 0))
+        self.tactile_embd = _resolve_tactile_embd(args)
         self.tactile_key = str(getattr(args, "tactile_npz_key", "tactile"))
         self.variable_history_sampling = args.variable_history_sampling
         self.transform = transforms.Resize((int(args.input_h), int(args.input_w)))
@@ -745,7 +795,9 @@ class MultiViewMP4VideoDataset(OpenXMP4VideoDataset):
         if tactile is None:
             return frames, actions
 
-        tactile = torch.from_numpy(_prepare_tactile_array(tactile)).float()
+        tactile = torch.from_numpy(
+            _prepare_tactile_array(tactile, self.tactile_embd)
+        ).float()
         if self.tactile_dim > 0:
             assert (
                 tactile.shape[1] == self.tactile_dim

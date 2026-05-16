@@ -10,7 +10,7 @@ def latest_context_tactile_state(
     tactile: torch.Tensor | None,
     context_frames: int,
 ) -> torch.Tensor | None:
-    """Select the tactile CLS state from the latest ground-truth context frame."""
+    """Select tactile from the latest clean context frame, never from future frames."""
     if tactile is None:
         return None
     if context_frames <= 0:

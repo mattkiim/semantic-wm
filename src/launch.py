@@ -38,8 +38,11 @@ def get_configs():
                         help="Condition the DiT on per-frame tactile vectors when available.")
     parser.add_argument("--tactile_dim", type=int, default=0,
                         help="Tactile vector dimensionality. Values > 0 enable tactile conditioning.")
-    parser.add_argument("--h5_tactile_key", type=str, default="cam_tactile_patch_embd",
-                        help="HDF5 dataset key for tactile vectors inside each trajectory group.")
+    parser.add_argument("--tactile_embd", type=str, choices=["cls", "mean"], default="cls",
+                        help="Use the tactile CLS embedding or mean-pooled tactile patch embeddings.")
+    parser.add_argument("--h5_tactile_key", type=str, default=None,
+                        help="Override the HDF5 tactile key. Defaults to cam_tactile_cls_embd for "
+                             "--tactile_embd cls and cam_tactile_patch_embd for --tactile_embd mean.")
     parser.add_argument("--tactile_npz_key", type=str, default="tactile",
                         help="NPZ key for tactile vectors in MP4 datasets.")
     parser.add_argument("--num_workers", type=int, default=6)
@@ -52,7 +55,7 @@ def get_configs():
     parser.add_argument("--ema_decay", type=float, default=0.9995)
     parser.add_argument("--num_epochs", type=int, default=100)
     parser.add_argument("--action_dropout_prob", type=float, default=0.1)
-    parser.add_argument("--tactile_dropout_prob", type=float, default=0.0,
+    parser.add_argument("--tactile_dropout_prob", type=float, default=0.2,
                         help="Probability of zeroing tactile conditioning during training.")
     parser.add_argument(
         "--objective",

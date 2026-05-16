@@ -77,6 +77,7 @@ def get_configs():
     parser.add_argument("--action_dim", type=int, default=10)
     parser.add_argument("--use_tactile", type=lambda x: x.lower() == "true", default=False)
     parser.add_argument("--tactile_dim", type=int, default=0)
+    parser.add_argument("--tactile_embd", type=str, choices=["cls", "mean"], default="cls")
     parser.add_argument("--tactile_npz_key", type=str, default="tactile")
 
     # ── Adapter ──────────────────────────────────────────────────────────

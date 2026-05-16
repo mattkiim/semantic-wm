@@ -91,6 +91,7 @@ class H5EmbeddingDataset(Dataset):
         self.variable_history_sampling = args.variable_history_sampling
         self.transform = transforms.Resize((int(args.input_h), int(args.input_w)))
         self.spill_only = spill_only
+        self.return_labels = bool(getattr(args, "return_labels", False))
 
         self._h5_file = None
 
@@ -184,7 +185,11 @@ class H5EmbeddingDataset(Dataset):
                 traj[self.rgb_target_key][unique_sorted.tolist()][inverse]
                 if self.return_rgb_target else None
             )
-            return self._pack(emb, actions, tactile, rgb_target)
+            out = self._pack(emb, actions, tactile, rgb_target)
+            if self.return_labels and "labels" in traj:
+                labels = torch.from_numpy(np.array(traj["labels"])[idx_arr]).long()
+                return (*out, labels)
+            return out
 
         key = self.traj_keys[idx]
         length = self.traj_lengths[idx]
@@ -246,7 +251,11 @@ class H5EmbeddingDataset(Dataset):
             actions.shape[1] == self.action_dim
         ), f"Unexpected action dim: {actions.shape[1]} != {self.action_dim}"
 
-        return self._pack(emb, actions, tactile, rgb_target)
+        out = self._pack(emb, actions, tactile, rgb_target)
+        if self.return_labels and "labels" in traj:
+            labels = torch.from_numpy(np.array(traj["labels"])[idx_arr]).long()
+            return (*out, labels)
+        return out
 
     def _pack(self, emb, actions, tactile, rgb_target):
         emb = torch.from_numpy(np.array(emb)).float()

@@ -80,7 +80,7 @@ CUDA_VISIBLE_DEVICES=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python -
 
 
 # --   DiT on precomputed DinoV3 (RGB only)   -- #
-CUDA_VISIBLE_DEVICES=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python -m src.launch \
+CUDA_VISIBLE_DEVICES=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python -m src.launch \
   --h5_train_path /extra_storage/mkim/data/consolidated_train_backbone_labeled_new.h5 \
   --h5_val_path /extra_storage/mkim/data/consolidated_val_backbone_labeled_new.h5 \
   --encoder_type precomputed \
@@ -97,8 +97,8 @@ CUDA_VISIBLE_DEVICES=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python -
   --wandb_project_name semantic-wm \
   --warmup_epochs 100 \
   --num_epochs 4000 \
-  --log_every_samples 10000 \
-  --validate_every_samples 1000 \
+  --log_every_samples 1000 \
+  --validate_every_samples 10000 \
   --use_pixel_decoder_for_val True \
   --save_model True \
   --checkpoint_dir outputs/dit_dinov3_precomputed_rgb_v2
@@ -130,7 +130,7 @@ CUDA_VISIBLE_DEVICES=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python -
   --validate_every_samples 10000 \
   --use_pixel_decoder_for_val True \
   --save_model True \
-  --checkpoint_dir outputs/dit_dinov3_precomputed_tactile_v1_do_0.2_cls_new_adapter_long
+  --checkpoint_dir outputs/dit_dinov3_precomputed_tactile_v2_do_0.2_cls_new_adapter_long
 
 
 # -- eval -- #
@@ -149,6 +149,7 @@ CUDA_VISIBLE_DEVICES=0 python -m src.eval_spill \
   --h5_tactile_key cam_tactile_cls_embd \
   --use_pixel_decoder_for_val True \
   --output_dir eval_outputs/spill_tactile_v1
+  
 
 # rgb
 CUDA_VISIBLE_DEVICES=0 python -m src.eval_spill \
